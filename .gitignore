@@ -426,3 +426,14 @@ FodyWeavers.xsd
 
 # Official VS Code C# Dev Kit Extension exclusion
 #*.lscache
+
+# Arquivos de IA: ficam so locais, nunca versionados
+AGENTS.md
+CLAUDE.md
+CLAUDE.local.md
+MEMORY.md
+PROJECT_MEMORY.md
+.claude/
+memory/
+.clinerules
+.cursor/

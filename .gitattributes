@@ -1,0 +1,30 @@
+# Normaliza fim de linha: LF no repositório, nativo no checkout
+* text=auto
+
+# Código e configuração
+*.cs      text diff=csharp
+*.xaml    text
+*.csproj  text
+*.props   text
+*.targets text
+*.slnx    text
+*.json    text
+*.md      text
+*.yml     text
+*.yaml    text
+*.editorconfig text
+
+# Arquivos que o Windows espera com CRLF
+*.sln     text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# Binários
+*.png     binary
+*.jpg     binary
+*.ico     binary
+*.gif     binary
+*.zip     binary
+*.exe     binary
+*.dll     binary
