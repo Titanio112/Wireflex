@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Wireflex.App/Wireflex.App.csproj" />
+    <Project Path="src/Wireflex.Core/Wireflex.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Wireflex.Tests/Wireflex.Tests.csproj" />
+  </Folder>
+</Solution>
