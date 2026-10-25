@@ -8,6 +8,7 @@ using Wireflex.Core.Decisions;
 using Wireflex.Core.Execution;
 using Wireflex.Core.Logging;
 using Wireflex.Core.Monitoring;
+using Wireflex.Core.Scrcpy;
 
 namespace Wireflex.Core.Connection;
 
@@ -54,6 +55,12 @@ public sealed class ConnectionCoordinatorOptions
 
     /// <summary>Espera máxima entre tentativas de reconexão de um mesmo celular (dobra a cada falha).</summary>
     public TimeSpan MaxReconnectInterval { get; init; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>Espera antes de abrir de novo um scrcpy que falhou logo ao abrir (ex: Wi-Fi instável logo depois da troca).</summary>
+    public TimeSpan ScrcpyRetryDelay { get; init; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Máximo de novas tentativas seguidas por celular, até a conexão mudar ou um scrcpy ficar aberto.</summary>
+    public int ScrcpyRetryLimit { get; init; } = 3;
 }
 
 /// <summary>
@@ -103,6 +110,10 @@ public sealed class ConnectionCoordinator
     // Preparação em andamento (inclusive o connect em segundo plano): a reconexão não tenta junto.
     private readonly HashSet<string> _preparing = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ReconnectState> _reconnect = new(StringComparer.Ordinal);
+
+    // Novas tentativas de abrir o scrcpy depois de ele falhar ao iniciar.
+    private readonly Dictionary<string, ScrcpyRetryState> _scrcpyRetries = new(StringComparer.Ordinal);
+    private int _scrcpyRetryGeneration;
     private bool _adbAvailable;
     private int _holdGeneration;
     private int _started;
@@ -251,6 +262,10 @@ public sealed class ConnectionCoordinator
                 break;
             case InputMessage i:
                 await ApplyAsync(i.Input, cancellationToken).ConfigureAwait(false);
+                OnInputApplied(i.Input);
+                break;
+            case ScrcpyRetryMessage r:
+                await OnScrcpyRetryAsync(r, cancellationToken).ConfigureAwait(false);
                 break;
             case LearnedMessage l:
                 // Grava já: se o tcpip/connect demorar ou falhar, o IP e o nome não se perdem.
@@ -335,6 +350,9 @@ public sealed class ConnectionCoordinator
     private async Task OnPhoneChangedAsync(DeviceConnection connection, CancellationToken cancellationToken)
     {
         var serial = connection.Key;
+
+        // A conexão mudou: o motor reavalia por conta própria e as novas tentativas recomeçam do zero.
+        ResetScrcpyRetries(serial);
 
         if (_connections.ContainsKey(connection.AdbSerial) && connection.State == AdbDeviceState.Device)
         {
@@ -554,6 +572,78 @@ public sealed class ConnectionCoordinator
         {
         }
     }
+
+    /// <summary>
+    /// Depois de o motor ver a entrada: o motor não reabre um scrcpy que encerrou sozinho (evita laço) e espera o
+    /// estado do adb mudar. Se ele falhou logo ao abrir e nada mudar, o celular ficaria sem espelho: tenta de novo,
+    /// no máximo <see cref="ConnectionCoordinatorOptions.ScrcpyRetryLimit"/> vezes seguidas.
+    /// </summary>
+    private void OnInputApplied(EngineInput input)
+    {
+        switch (input)
+        {
+            case ScrcpyExited { FailedAtStart: true } e:
+                ScheduleScrcpyRetry(e.Serial);
+                break;
+            case ScrcpyExited e when e.Runtime > ScrcpyExit.StartupWindow:
+                // Ficou aberto um tempo: a sequência de falhas acabou.
+                ResetScrcpyRetries(e.Serial);
+                break;
+            case ScrcpyClosedByUser e:
+                ResetScrcpyRetries(e.Serial);
+                break;
+            case PhonePauseChanged e:
+                ResetScrcpyRetries(e.Serial);
+                break;
+        }
+    }
+
+    private void ScheduleScrcpyRetry(string serial)
+    {
+        if (!_scrcpyRetries.TryGetValue(serial, out var state))
+        {
+            state = new ScrcpyRetryState();
+            _scrcpyRetries[serial] = state;
+        }
+
+        if (state.Attempts >= _options.ScrcpyRetryLimit)
+        {
+            Note($"O scrcpy de {Sensitive.Mask(serial)} falhou ao abrir {state.Attempts + 1} vezes seguidas; só tenta de novo quando a conexão mudar");
+            return;
+        }
+
+        state.Attempts++;
+        state.Generation = ++_scrcpyRetryGeneration;
+        _background.Add(ScrcpyRetryLaterAsync(serial, state.Generation));
+    }
+
+    private async Task ScrcpyRetryLaterAsync(string serial, int generation)
+    {
+        try
+        {
+            await Task.Delay(_options.ScrcpyRetryDelay, _time, _stopToken).ConfigureAwait(false);
+            _inbox.Writer.TryWrite(new ScrcpyRetryMessage(serial, generation));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task OnScrcpyRetryAsync(ScrcpyRetryMessage message, CancellationToken cancellationToken)
+    {
+        if (!_scrcpyRetries.TryGetValue(message.Serial, out var state) || state.Generation != message.Generation)
+        {
+            return;
+        }
+
+        // O motor decide: não abre se o usuário fechou, se está pausado, fora do alcance ou já espelhando.
+        Note($"Tentando abrir o scrcpy de {Sensitive.Mask(message.Serial)} de novo ({state.Attempts} de {_options.ScrcpyRetryLimit})");
+        await ApplyAsync(new Reevaluate(message.Serial, "nova tentativa depois de o scrcpy falhar ao abrir"), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>Zera as novas tentativas; uma tentativa já agendada é descartada.</summary>
+    private void ResetScrcpyRetries(string serial) => _scrcpyRetries.Remove(serial);
 
     private async Task ReleaseAsync(string serial, CancellationToken cancellationToken)
     {
@@ -811,7 +901,17 @@ public sealed class ConnectionCoordinator
         public bool InFlight { get; set; }
     }
 
+    private sealed class ScrcpyRetryState
+    {
+        /// <summary>Novas tentativas já feitas (ou agendadas) nesta sequência de falhas.</summary>
+        public int Attempts { get; set; }
+
+        public int Generation { get; set; }
+    }
+
     private abstract record Message;
+
+    private sealed record ScrcpyRetryMessage(string Serial, int Generation) : Message;
 
     private sealed record MonitorMessage(DeviceEvent Event) : Message;
 

@@ -21,7 +21,10 @@ public sealed record ScrcpyStarted(string Serial, string AdbSerial) : EngineInpu
 public sealed record ScrcpyClosedByUser(string Serial, string AdbSerial) : EngineInput;
 
 /// <summary>O scrcpy terminou sem ser pelo usuário (erro, conexão caiu, foi fechado pelo próprio app).</summary>
-public sealed record ScrcpyExited(string Serial, string AdbSerial) : EngineInput;
+/// <param name="FailedAtStart">Falhou logo depois de abrir (código 1 nos primeiros segundos).</param>
+/// <param name="Runtime">Quanto tempo ficou aberto (zero se não chegou a abrir).</param>
+/// <remarks>O motor não usa <paramref name="FailedAtStart"/> nem <paramref name="Runtime"/>: servem ao coordenador, que decide se tenta de novo.</remarks>
+public sealed record ScrcpyExited(string Serial, string AdbSerial, bool FailedAtStart = false, TimeSpan Runtime = default) : EngineInput;
 
 /// <summary>O usuário pausou (ou retomou) este celular.</summary>
 public sealed record PhonePauseChanged(string Serial, bool Paused) : EngineInput;

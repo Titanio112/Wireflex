@@ -22,6 +22,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     private static readonly TimeSpan StableWindow = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan HoldLimit = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
 
     private readonly TimerTrackingTimeProvider _time = new();
     private readonly ScriptedAdbClient _adb = new();
@@ -455,6 +456,118 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task ScrcpyFalhaAoAbrir_TentaDeNovoDepoisDeDoisSegundos()
+    {
+        await MirroringByCableAsync();
+
+        // Ex: logo depois da troca para o Wi-Fi o adb push falha e o scrcpy sai com 1; o estado do adb não muda.
+        await FailAtStartAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyFalhaAoAbrir_NoMaximoTresTentativasSeguidas()
+    {
+        await MirroringByCableAsync();
+
+        for (var i = 0; i < 3; i++)
+        {
+            await FailAtStartAsync();
+            await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
+            await IdleAsync();
+        }
+
+        await FailAtStartAsync();
+        _time.Advance(RetryDelay);
+        await IdleAsync();
+
+        // A aberta pelo cabo + 3 tentativas.
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyAbertoMaisDeDezSegundos_ZeraAsTentativas()
+    {
+        await UseAllRetriesAsync();
+
+        // O da 3ª tentativa ficou aberto 30 s e caiu: não é falha ao abrir, e a contagem recomeça.
+        _coordinator.Post(new ScrcpyExited(Phone, Phone, FailedAtStart: false, Runtime: TimeSpan.FromSeconds(30)));
+        await IdleAsync();
+        _coordinator.Post(new Reevaluate(Phone, "teste"));
+        await IdleAsync();
+        var opens = _executor.Actions.OfType<OpenScrcpy>().Count();
+
+        await FailAtStartAsync();
+        await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
+        await IdleAsync();
+
+        Assert.Equal(opens + 1, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ConexaoMuda_ZeraAsTentativas()
+    {
+        await UseAllRetriesAsync();
+        await FailAtStartAsync();
+
+        // O Wi-Fi conecta: o motor abre por conta própria e, se falhar de novo, volta a tentar.
+        await SendAsync(new DeviceAppeared(Wifi()));
+        var opens = _executor.Actions.OfType<OpenScrcpy>().Count();
+        _coordinator.Post(new ScrcpyExited(Phone, Phone, FailedAtStart: true));
+        await IdleAsync();
+        await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
+        await IdleAsync();
+
+        Assert.Equal(opens + 1, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyFalhaAoAbrir_PausadoNaoReabre()
+    {
+        await MirroringByCableAsync();
+        await FailAtStartAsync();
+
+        _coordinator.Post(new PhonePauseChanged(Phone, true));
+        await IdleAsync();
+        _time.Advance(RetryDelay);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyFalhaAoAbrir_ForaDoAlcanceNaoReabre()
+    {
+        await MirroringByCableAsync();
+        await FailAtStartAsync();
+
+        await SendAsync(new DeviceDisappeared(Usb()));
+        _time.Advance(RetryDelay);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task UsuarioFechouAJanela_NaoTentaDeNovo()
+    {
+        await MirroringByCableAsync();
+
+        _coordinator.Post(new ScrcpyClosedByUser(Phone, Phone));
+        await IdleAsync();
+        _time.Advance(RetryDelay);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+        Assert.Equal(PhonePhase.ClosedByUser, Assert.Single(_coordinator.GetStatus()).Phase);
+    }
+
+    [Fact]
     public async Task CadaAcao_VaiParaOLogComOTextoDaTela()
     {
         var logs = new RecordingLoggerFactory();
@@ -497,6 +610,36 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     private Task AdbAvailableAsync() => SendAsync(new MonitorStatusChanged(true, null));
+
+    private async Task MirroringByCableAsync()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    /// <summary>O scrcpy aberto sai com 1 logo ao abrir (o executor informa assim).</summary>
+    private async Task FailAtStartAsync()
+    {
+        var open = _executor.Actions.OfType<OpenScrcpy>().Last();
+        _coordinator.Post(new ScrcpyExited(Phone, open.AdbSerial, FailedAtStart: true, Runtime: TimeSpan.FromSeconds(0.4)));
+        await IdleAsync();
+    }
+
+    /// <summary>Abre pelo cabo e gasta as 3 tentativas (a 3ª fica aberta).</summary>
+    private async Task UseAllRetriesAsync()
+    {
+        await MirroringByCableAsync();
+        for (var i = 0; i < 3; i++)
+        {
+            await FailAtStartAsync();
+            await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
 
     private async Task SendAsync(DeviceEvent deviceEvent)
     {

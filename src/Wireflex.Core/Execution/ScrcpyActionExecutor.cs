@@ -252,7 +252,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
             kind);
         _report(kind == ScrcpyExitKind.ClosedByUser
             ? new ScrcpyClosedByUser(serial, running.AdbSerial)
-            : new ScrcpyExited(serial, running.AdbSerial));
+            : new ScrcpyExited(serial, running.AdbSerial, kind == ScrcpyExitKind.StartFailed, runtime));
     }
 
     private async Task StopAsync(string serial, string reason)

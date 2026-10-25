@@ -124,7 +124,9 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
         time.Advance(TimeSpan.FromSeconds(seconds));
         _launcher.Started[0].Exit(1);
 
-        Assert.Equal(new ScrcpyExited(Phone, Phone), await NextReportAsync());
+        var exited = Assert.IsType<ScrcpyExited>(await NextReportAsync());
+        Assert.Equal(expectedKind == "StartFailed", exited.FailedAtStart);
+        Assert.Equal(TimeSpan.FromSeconds(seconds), exited.Runtime);
         Assert.Contains(logger.Messages, m => m.Contains("terminou") && m.Contains($"({expectedKind})"));
     }
 
@@ -180,15 +182,16 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
     }
 
     [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    public async Task ScrcpyTerminaComErro_InformaQueEncerrouSozinho(int code)
+    [InlineData(1, true)]
+    [InlineData(2, false)]
+    public async Task ScrcpyTerminaComErro_InformaQueEncerrouSozinho(int code, bool failedAtStart)
     {
         await OpenAsync();
 
         _launcher.Started[0].Exit(code);
 
-        Assert.Equal(new ScrcpyExited(Phone, Phone), await NextReportAsync());
+        var exited = Assert.IsType<ScrcpyExited>(await NextReportAsync());
+        Assert.Equal((Phone, Phone, failedAtStart), (exited.Serial, exited.AdbSerial, exited.FailedAtStart));
     }
 
     [Fact]
