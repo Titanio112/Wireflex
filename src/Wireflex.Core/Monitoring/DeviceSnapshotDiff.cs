@@ -6,8 +6,8 @@ namespace Wireflex.Core.Monitoring;
 /// Compara duas fotos das conexões e gera os eventos. Função pura.
 /// </summary>
 /// <remarks>
-/// Ordem dos eventos: aparecimentos, mudanças de estado e só depois sumiços. Assim, quando o cabo sai e o
-/// Wi-Fi já está lá, o motor vê primeiro que existe outro caminho e consegue trocar em vez de fechar.
+/// Ordem dos eventos: aparecimentos (cabo primeiro), mudanças de estado e só depois sumiços. Assim, quando o
+/// cabo sai e o Wi-Fi já está lá, o motor vê primeiro que existe outro caminho e consegue trocar em vez de fechar.
 /// </remarks>
 public static class DeviceSnapshotDiff
 {
@@ -49,7 +49,10 @@ public static class DeviceSnapshotDiff
         }
 
         var events = new List<DeviceEvent>(appeared.Count + changed.Count + disappeared.Count);
-        events.AddRange(appeared);
+
+        // Cabo antes do Wi-Fi: na partida, com os dois, o motor abre direto pelo cabo em vez de abrir pelo
+        // Wi-Fi e trocar logo em seguida. OrderBy é estável: mantém a ordem do serial dentro do transporte.
+        events.AddRange(appeared.OrderBy(e => AdbTransports.Priority(((DeviceAppeared)e).Connection.Transport)));
         events.AddRange(changed);
         events.AddRange(disappeared);
         events.AddRange(TransportChanges(previous.Values, current.Values));

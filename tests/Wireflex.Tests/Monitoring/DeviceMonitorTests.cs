@@ -111,6 +111,22 @@ public sealed class DeviceMonitorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task FirstSnapshot_CableAndWifi_CableAppearsFirst()
+    {
+        // O IP:porta vem antes do serial em ordem alfabética; o cabo tem que chegar primeiro mesmo assim.
+        _adb.SerialLookup = _ => "TESTSERIAL01";
+        var session = _adb.AddSession();
+        Start();
+
+        session.Push(Devices.Tcpip("192.0.2.10:5555"), Devices.Usb("TESTSERIAL01"));
+
+        var first = await NextEventAsync<DeviceAppeared>();
+        var second = await NextEventAsync<DeviceAppeared>();
+        Assert.Equal(AdbTransport.Usb, first.Connection.Transport);
+        Assert.Equal(AdbTransport.WifiTcpip, second.Connection.Transport);
+    }
+
+    [Fact]
     public async Task StreamEnds_RecoversWithGrowingDelay_AndResetsAfterSuccess()
     {
         var first = _adb.AddSession();
