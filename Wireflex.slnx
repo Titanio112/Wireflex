@@ -6,4 +6,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/Wireflex.Tests/Wireflex.Tests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Wireflex.DevConsole/Wireflex.DevConsole.csproj" />
+  </Folder>
 </Solution>
