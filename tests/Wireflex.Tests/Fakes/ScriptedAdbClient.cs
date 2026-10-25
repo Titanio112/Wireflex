@@ -14,6 +14,9 @@ internal sealed class ScriptedAdbClient : IAdbClient
     /// <summary>Saída de cada comando do shell. Sem entrada: lança <see cref="AdbException"/>.</summary>
     public Dictionary<string, string> Shell { get; } = new(StringComparer.Ordinal);
 
+    /// <summary>Saída de um comando só para um aparelho (<c>"serial comando"</c>); tem prioridade sobre <see cref="Shell"/>.</summary>
+    public Dictionary<string, string> ShellFor { get; } = new(StringComparer.Ordinal);
+
     /// <summary>Resposta do connect. Padrão: conecta.</summary>
     public Func<string, int, AdbConnectResult> Connect { get; set; } =
         (host, port) => new AdbConnectResult(true, $"connected to {host}:{port}");
@@ -46,7 +49,7 @@ internal sealed class ScriptedAdbClient : IAdbClient
     public Task<string> ShellAsync(string adbSerial, string command, CancellationToken cancellationToken = default)
     {
         Record($"shell {adbSerial} {command}");
-        return Shell.TryGetValue(command, out var output)
+        return ShellFor.TryGetValue($"{adbSerial} {command}", out var output) || Shell.TryGetValue(command, out output)
             ? Task.FromResult(output)
             : Task.FromException<string>(new AdbException($"comando sem roteiro: {command}"));
     }

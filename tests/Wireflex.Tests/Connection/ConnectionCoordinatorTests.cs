@@ -87,6 +87,26 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task DoisCelularesNoCabo_IpDeCadaUmGravado()
+    {
+        // Regressão: um celular já conhecido, mas sem IP gravado, tem que ganhar o IP como o outro.
+        const string other = "TESTSERIAL02";
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        _adb.ShellFor[$"{other} ip route"] = "192.0.2.0/24 dev wlan0 proto kernel scope link src 192.0.2.20\n";
+        var stored = new WireflexConfig();
+        stored.Phones.Add(new KnownPhone { Serial = other, Model = "Other Phone" });
+        Start(real: true, stored);
+        await AdbAvailableAsync();
+
+        _coordinator.PostDeviceEvent(new DeviceAppeared(Usb()));
+        await SendAsync(new DeviceAppeared(new DeviceConnection(other, other, AdbTransport.Usb, AdbDeviceState.Device, "Other Phone")));
+
+        Assert.Equal(Ip, _store.Last!.FindPhone(Phone)!.LastKnownIp);
+        Assert.Equal("192.0.2.20", _store.Last!.FindPhone(other)!.LastKnownIp);
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
     public async Task Porta5555EIpConhecido_AbreNaHoraSemTcpipEConectaDepois()
     {
         // O connect fica preso (ex: IP errado): o espelhamento não pode esperar por ele.
