@@ -26,6 +26,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
     private readonly TimeSpan _stopTimeout;
     private readonly Func<string, string>? _windowTitleForLog;
     private readonly TimeSpan? _windowCheckDelay;
+    private readonly TimeProvider _time;
     private readonly object _sync = new();
     private readonly Dictionary<string, Running> _running = new(StringComparer.Ordinal);
     private bool _disposed;
@@ -34,6 +35,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
     /// <param name="report">Recebe o que aconteceu com o scrcpy, para repassar ao motor.</param>
     /// <param name="windowTitleForLog">Título para o log, sem dados pessoais. Sem isto, usa <paramref name="windowTitle"/>.</param>
     /// <param name="windowCheckDelay">Diagnóstico: quanto depois de abrir conferir o título da janela no log. <c>null</c> = não confere.</param>
+    /// <param name="timeProvider">Relógio para medir quanto tempo cada scrcpy ficou aberto (os testes usam um falso).</param>
     public ScrcpyActionExecutor(
         IScrcpyLauncher launcher,
         IUserNotifier notifier,
@@ -42,7 +44,8 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         ILogger<ScrcpyActionExecutor>? logger = null,
         TimeSpan? stopTimeout = null,
         Func<string, string>? windowTitleForLog = null,
-        TimeSpan? windowCheckDelay = null)
+        TimeSpan? windowCheckDelay = null,
+        TimeProvider? timeProvider = null)
     {
         _launcher = launcher ?? throw new ArgumentNullException(nameof(launcher));
         _notifier = notifier ?? throw new ArgumentNullException(nameof(notifier));
@@ -52,6 +55,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         _stopTimeout = stopTimeout ?? DefaultStopTimeout;
         _windowTitleForLog = windowTitleForLog;
         _windowCheckDelay = windowCheckDelay;
+        _time = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>Um scrcpy aberto agora: para diagnóstico (comando <c>j</c> do DevConsole).</summary>
@@ -151,7 +155,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
             return;
         }
 
-        var running = new Running(adbSerial, process, title);
+        var running = new Running(adbSerial, process, title, _time.GetTimestamp());
         lock (_sync)
         {
             _running[serial] = running;
@@ -198,8 +202,14 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
             _running.Remove(serial);
         }
 
-        var kind = ScrcpyExit.Classify(exitCode);
-        _logger.LogInformation("scrcpy de {Phone} terminou: código {Code} ({Kind})", Sensitive.Mask(serial), exitCode, kind);
+        var runtime = _time.GetElapsedTime(running.StartedTimestamp);
+        var kind = ScrcpyExit.Classify(exitCode, runtime);
+        _logger.LogInformation(
+            "scrcpy de {Phone} terminou depois de {Seconds:0.0} s: código {Code} ({Kind})",
+            Sensitive.Mask(serial),
+            runtime.TotalSeconds,
+            exitCode,
+            kind);
         _report(kind == ScrcpyExitKind.ClosedByUser
             ? new ScrcpyClosedByUser(serial, running.AdbSerial)
             : new ScrcpyExited(serial, running.AdbSerial));
@@ -230,8 +240,10 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         }
     }
 
-    private sealed class Running(string adbSerial, IScrcpyProcess process, string title)
+    private sealed class Running(string adbSerial, IScrcpyProcess process, string title, long startedTimestamp)
     {
+        public long StartedTimestamp { get; } = startedTimestamp;
+
         public string AdbSerial { get; } = adbSerial;
 
         public IScrcpyProcess Process { get; } = process;

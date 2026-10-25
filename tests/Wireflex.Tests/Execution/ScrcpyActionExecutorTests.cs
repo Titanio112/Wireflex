@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using Microsoft.Extensions.Time.Testing;
 using Wireflex.Core.Adb;
 using Wireflex.Core.Configuration;
 using Wireflex.Core.Decisions;
@@ -57,6 +58,41 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
     public void CodigoDeSaida_SegueODocumentadoNoScrcpy(int code, ScrcpyExitKind kind)
     {
         Assert.Equal(kind, ScrcpyExit.Classify(code));
+    }
+
+    [Theory]
+    [InlineData(1, 2, ScrcpyExitKind.StartFailed)]
+    [InlineData(1, 10, ScrcpyExitKind.StartFailed)]
+    [InlineData(1, 37, ScrcpyExitKind.DeviceDisconnected)]
+    [InlineData(2, 1, ScrcpyExitKind.DeviceDisconnected)]
+    [InlineData(0, 37, ScrcpyExitKind.ClosedByUser)]
+    public void CodigoDeSaida_UmDepoisDeRodarMuitoTempoEDesconexao(int code, int seconds, ScrcpyExitKind kind)
+    {
+        Assert.Equal(kind, ScrcpyExit.Classify(code, TimeSpan.FromSeconds(seconds)));
+    }
+
+    [Theory]
+    [InlineData(2, "StartFailed")]
+    [InlineData(37, "DeviceDisconnected")]
+    public async Task CodigoUm_UsaOTempoQueOScrcpyFicouAberto(int seconds, string expectedKind)
+    {
+        var time = new FakeTimeProvider();
+        var logger = new RecordingLogger<ScrcpyActionExecutor>();
+        await using var executor = new ScrcpyActionExecutor(
+            _launcher,
+            _notifier,
+            serial => $"Wireflex - {serial}",
+            input => _reports.Writer.TryWrite(input),
+            logger,
+            timeProvider: time);
+        await executor.ExecuteAsync(new OpenScrcpy(Phone, Phone, AdbTransport.Usb));
+        await NextReportAsync();
+
+        time.Advance(TimeSpan.FromSeconds(seconds));
+        _launcher.Started[0].Exit(1);
+
+        Assert.Equal(new ScrcpyExited(Phone, Phone), await NextReportAsync());
+        Assert.Contains(logger.Messages, m => m.Contains("terminou") && m.Contains($"({expectedKind})"));
     }
 
     [Fact]
