@@ -230,6 +230,11 @@ public sealed class ConnectionCoordinator
             case InputMessage i:
                 await ApplyAsync(i.Input, cancellationToken).ConfigureAwait(false);
                 break;
+            case LearnedMessage l:
+                // Grava já: se o tcpip/connect demorar ou falhar, o IP e o nome não se perdem.
+                await _catalog.LearnAsync(l.Serial, friendlyName: l.DeviceName, ip: l.Ip, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                break;
             case PreparedMessage p:
                 await OnPreparedAsync(p, cancellationToken).ConfigureAwait(false);
                 break;
@@ -384,7 +389,11 @@ public sealed class ConnectionCoordinator
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stopToken, timeout.Token);
         try
         {
-            result = await _preparer.PrepareAsync(usbAdbSerial, connectWifi, linked.Token).ConfigureAwait(false);
+            result = await _preparer.PrepareAsync(
+                usbAdbSerial,
+                connectWifi,
+                linked.Token,
+                (ip, name) => _inbox.Writer.TryWrite(new LearnedMessage(serial, ip, name))).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!_stopToken.IsCancellationRequested)
         {
@@ -680,6 +689,8 @@ public sealed class ConnectionCoordinator
     private sealed record MonitorMessage(DeviceEvent Event) : Message;
 
     private sealed record InputMessage(EngineInput Input) : Message;
+
+    private sealed record LearnedMessage(string Serial, string? Ip, string? DeviceName) : Message;
 
     private sealed record PreparedMessage(string Serial, WifiPreparation? Result) : Message;
 

@@ -85,6 +85,21 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task NomeEIp_GravadosAntesDoConnect()
+    {
+        Start(real: true);
+        await AdbAvailableAsync();
+
+        await SendAsync(new DeviceAppeared(Usb()));
+
+        // O tcpip rodou e o connect ainda espera: o IP e o nome já estão no config.json.
+        Assert.Equal(0, _adb.Count("connect"));
+        Assert.Equal(Ip, _store.Last!.FindPhone(Phone)!.LastKnownIp);
+        Assert.Equal("Celular de Teste", _store.Last!.FindPhone(Phone)!.FriendlyName);
+        Assert.Equal("Test Phone", _store.Last!.FindPhone(Phone)!.Model);
+    }
+
+    [Fact]
     public async Task CelularJaPlugadoNaPartida_TambemPrepara()
     {
         // Na partida, o monitor manda os aparelhos antes do "adb disponível".

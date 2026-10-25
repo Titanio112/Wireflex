@@ -65,7 +65,13 @@ public sealed class WifiPreparer
 
     /// <param name="usbAdbSerial">Conexão USB do celular.</param>
     /// <param name="connectWifi"><c>false</c>: só aprende IP e nome, sem <c>tcpip</c> nem <c>connect</c>.</param>
-    public async Task<WifiPreparation> PrepareAsync(string usbAdbSerial, bool connectWifi, CancellationToken cancellationToken)
+    /// <param name="onLearned">Chamado assim que IP e nome são lidos, antes do <c>tcpip</c> e do <c>connect</c>:
+    /// o que foi aprendido não se perde se o resto demorar ou falhar.</param>
+    public async Task<WifiPreparation> PrepareAsync(
+        string usbAdbSerial,
+        bool connectWifi,
+        CancellationToken cancellationToken,
+        Action<string?, string?>? onLearned = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(usbAdbSerial);
 
@@ -77,6 +83,7 @@ public sealed class WifiPreparer
         ip ??= AndroidShellParser.ParseInetAddress(addresses);
         var name = AndroidShellParser.ParseDeviceName(
             await TryShellAsync(usbAdbSerial, "settings get global device_name", cancellationToken).ConfigureAwait(false));
+        onLearned?.Invoke(ip, name);
 
         // Nenhum dos dois comandos respondeu: não dá para saber se há Wi-Fi (ex: adbd reiniciando).
         var responded = routes is not null || addresses is not null;
