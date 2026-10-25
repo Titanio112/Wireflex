@@ -58,10 +58,18 @@ internal sealed class ScriptedAdbClient : IAdbClient
         return Task.FromResult($"restarting in TCP mode port: {port}");
     }
 
-    public Task<AdbConnectResult> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
+    /// <summary>O connect fica preso até ser cancelado (como com um IP errado na rede).</summary>
+    public bool ConnectHangs { get; set; }
+
+    public async Task<AdbConnectResult> ConnectAsync(string host, int port, CancellationToken cancellationToken = default)
     {
         Record($"connect {host}:{port}");
-        return Task.FromResult(Connect(host, port));
+        if (ConnectHangs)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+        }
+
+        return Connect(host, port);
     }
 
     private void Record(string call)

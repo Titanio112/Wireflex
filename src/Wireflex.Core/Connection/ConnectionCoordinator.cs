@@ -31,15 +31,23 @@ public sealed class ConnectionCoordinatorOptions
 
     public int TcpipPort { get; init; } = WifiPreparer.DefaultTcpipPort;
 
-    /// <summary>Tempo máximo segurando os eventos de um celular durante a preparação do Wi-Fi.</summary>
+    /// <summary>
+    /// Tempo máximo segurando o espelhamento depois do cabo (só quando o <c>tcpip</c> é necessário).
+    /// Estourou: solta e o motor abre pelo que houver.
+    /// </summary>
+    public TimeSpan HoldLimit { get; init; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>
+    /// Depois do <c>tcpip</c>, se a conexão USB não cair neste tempo (o adbd reiniciou rápido demais para o
+    /// monitor ver), ela é considerada estável e o espelhamento abre.
+    /// </summary>
+    public TimeSpan UsbStableWindow { get; init; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>Limite de segurança da preparação inteira, em segundo plano (não segura o espelhamento).</summary>
     public TimeSpan PreparationTimeout { get; init; } = TimeSpan.FromSeconds(30);
 
-    /// <summary>Depois do <c>tcpip</c>, quanto esperar a conexão USB voltar antes de soltar os eventos.</summary>
-    public TimeSpan UsbReturnGrace { get; init; } = TimeSpan.FromSeconds(5);
-
-    public int ConnectAttempts { get; init; } = 5;
-
-    public TimeSpan ConnectRetryDelay { get; init; } = TimeSpan.FromSeconds(1);
+    /// <summary>Passos do connect: espera depois do tcpip, limite por tentativa e total.</summary>
+    public WifiPreparerOptions Preparer { get; init; } = new();
 
     /// <summary>Intervalo entre rodadas de reconexão pelo Wi-Fi; também é a primeira espera de cada celular.</summary>
     public TimeSpan ReconnectInterval { get; init; } = TimeSpan.FromSeconds(15);
@@ -54,9 +62,15 @@ public sealed class ConnectionCoordinatorOptions
 /// <remarks>
 /// <list type="bullet">
 /// <item>Tudo passa por uma fila e é processado em ordem, um por vez (o motor não é thread-safe).</item>
-/// <item>Cabo plugado sem Wi-Fi conectado: aprende o IP, liga o modo TCP/IP e conecta por Wi-Fi.
-/// O <c>tcpip</c> reinicia o adbd e a conexão USB some e volta; por isso os eventos daquele celular ficam
-/// retidos até o fim da preparação, e o motor recebe só a diferença (cabo primeiro).</item>
+/// <item>Cabo plugado sem Wi-Fi conectado: lê IP, nome e a porta do TCP/IP pelo cabo (~0,1 s), com os eventos
+/// daquele celular retidos.
+/// <list type="bullet">
+/// <item>TCP/IP já ligado: solta na hora (espelha pelo cabo) e conecta o Wi-Fi em segundo plano.</item>
+/// <item>TCP/IP desligado: roda <c>tcpip</c>, que reinicia o adbd (a conexão USB some e volta). Solta quando o USB
+/// voltar, ou se ele não cair em <see cref="ConnectionCoordinatorOptions.UsbStableWindow"/>, ou no limite
+/// <see cref="ConnectionCoordinatorOptions.HoldLimit"/>; o connect segue em segundo plano.</item>
+/// </list>
+/// Ao soltar, o motor recebe só a diferença (cabo primeiro).</item>
 /// <item>Tirar o cabo: o motor troca o scrcpy para o Wi-Fi. Plugar de novo: volta para o cabo.</item>
 /// <item>Reconexão: de tempos em tempos, conecta pelo último IP os celulares conhecidos sem conexão Wi-Fi
 /// (fora do alcance, ou no cabo depois de o servidor do adb reiniciar).</item>
@@ -114,9 +128,14 @@ public sealed class ConnectionCoordinator
             adb,
             loggerFactory.CreateLogger<WifiPreparer>(),
             _time,
-            _options.TcpipPort,
-            _options.ConnectAttempts,
-            _options.ConnectRetryDelay);
+            new WifiPreparerOptions
+            {
+                Port = _options.TcpipPort,
+                TcpipSettleDelay = _options.Preparer.TcpipSettleDelay,
+                ConnectAttemptTimeout = _options.Preparer.ConnectAttemptTimeout,
+                ConnectLimit = _options.Preparer.ConnectLimit,
+                ConnectRetryDelay = _options.Preparer.ConnectRetryDelay,
+            });
     }
 
     /// <summary>Entrada vinda de fora do monitor: executor (scrcpy abriu/fechou), usuário (respondeu, pausou).</summary>
@@ -235,16 +254,14 @@ public sealed class ConnectionCoordinator
                 await _catalog.LearnAsync(l.Serial, friendlyName: l.DeviceName, ip: l.Ip, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 break;
+            case ReadyMessage r:
+                await OnReadyAsync(r, cancellationToken).ConfigureAwait(false);
+                break;
             case PreparedMessage p:
                 await OnPreparedAsync(p, cancellationToken).ConfigureAwait(false);
                 break;
             case ReleaseHoldMessage r:
-                if (_holds.TryGetValue(r.Serial, out var hold) && hold.Generation == r.Generation)
-                {
-                    Note($"O cabo de {Sensitive.Mask(r.Serial)} não voltou; seguindo com o que há");
-                    await ReleaseAsync(r.Serial, cancellationToken).ConfigureAwait(false);
-                }
-
+                await OnReleaseTimerAsync(r, cancellationToken).ConfigureAwait(false);
                 break;
             case ReconnectTickMessage:
                 StartReconnects();
@@ -324,15 +341,20 @@ public sealed class ConnectionCoordinator
         {
             if (connection.Transport == AdbTransport.Usb)
             {
+                var present = _connections.ContainsKey(connection.AdbSerial);
                 _logger.LogInformation(
                     "Tempo {Phone}: USB {State} {Seconds:0.000} s depois do cabo",
                     Sensitive.Mask(serial),
-                    _connections.ContainsKey(connection.AdbSerial) ? connection.State.ToString() : "sumiu",
+                    present ? connection.State.ToString() : "sumiu",
                     _time.GetElapsedTime(hold.StartedTimestamp).TotalSeconds);
+                if (!present || connection.State != AdbDeviceState.Device)
+                {
+                    hold.SawUsbDrop = true;
+                }
             }
 
-            // Segurando: o motor só fica sabendo quando a preparação terminar (e o cabo voltar).
-            if (hold.Prepared && UsbReady(serial))
+            // Segurando: depois do tcpip, solta quando a conexão USB cair e voltar.
+            if (hold.TcpipDone && hold.SawUsbDrop && UsbReady(serial))
             {
                 await ReleaseAsync(serial, cancellationToken).ConfigureAwait(false);
             }
@@ -375,13 +397,19 @@ public sealed class ConnectionCoordinator
 
         if (connectWifi)
         {
-            _holds[serial] = new Hold(++_holdGeneration, _time.GetTimestamp());
-            Note($"Cabo plugado em {Sensitive.Mask(serial)}: preparando o Wi-Fi (o espelhamento abre em seguida)");
+            // Segura só o tempo de ler a porta do TCP/IP (~0,1 s); se o tcpip for necessário, até o USB voltar.
+            var hold = new Hold(++_holdGeneration, _time.GetTimestamp());
+            _holds[serial] = hold;
+            _background.Add(ReleaseLaterAsync(serial, hold.Generation, _options.HoldLimit, ReleaseReason.Limit));
         }
 
         _background.Add(PrepareAsync(serial, usb.AdbSerial, connectWifi));
     }
 
+    /// <summary>
+    /// Em segundo plano: lê pelo cabo, liga o tcpip se precisar e conecta. Avisa o laço em cada etapa
+    /// (<see cref="LearnedMessage"/>, <see cref="ReadyMessage"/>, <see cref="PreparedMessage"/>), que decide quando soltar.
+    /// </summary>
     private async Task PrepareAsync(string serial, string usbAdbSerial, bool connectWifi)
     {
         WifiPreparation? result = null;
@@ -389,11 +417,31 @@ public sealed class ConnectionCoordinator
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stopToken, timeout.Token);
         try
         {
-            result = await _preparer.PrepareAsync(
-                usbAdbSerial,
-                connectWifi,
-                linked.Token,
-                (ip, name) => _inbox.Writer.TryWrite(new LearnedMessage(serial, ip, name))).ConfigureAwait(false);
+            var probe = await _preparer.ProbeAsync(usbAdbSerial, linked.Token).ConfigureAwait(false);
+            _inbox.Writer.TryWrite(new LearnedMessage(serial, probe.Ip, probe.DeviceName));
+
+            if (!connectWifi)
+            {
+                result = new WifiPreparation(probe.Ip, probe.DeviceName, WifiPreparationOutcome.LearnedOnly, TcpipEnabled: false);
+            }
+            else if (_preparer.NoWifiOutcome(usbAdbSerial, probe) is { } noWifi)
+            {
+                result = noWifi;
+            }
+            else
+            {
+                var tcpip = !probe.TcpipActive;
+                if (tcpip && !await _preparer.EnableTcpipAsync(usbAdbSerial, linked.Token).ConfigureAwait(false))
+                {
+                    result = new WifiPreparation(probe.Ip, probe.DeviceName, WifiPreparationOutcome.ConnectFailed, false, "tcpip falhou");
+                }
+                else
+                {
+                    _inbox.Writer.TryWrite(new ReadyMessage(serial, tcpip));
+                    result = await _preparer.ConnectAsync(usbAdbSerial, probe.Ip!, probe.DeviceName, tcpip, linked.Token)
+                        .ConfigureAwait(false);
+                }
+            }
         }
         catch (OperationCanceledException) when (!_stopToken.IsCancellationRequested)
         {
@@ -405,6 +453,53 @@ public sealed class ConnectionCoordinator
         }
 
         _inbox.Writer.TryWrite(new PreparedMessage(serial, result));
+    }
+
+    /// <summary>Leu a porta do TCP/IP (e rodou o tcpip, se precisava). O connect segue em segundo plano.</summary>
+    private async Task OnReadyAsync(ReadyMessage message, CancellationToken cancellationToken)
+    {
+        var serial = message.Serial;
+        if (!_holds.TryGetValue(serial, out var hold))
+        {
+            return;
+        }
+
+        if (!message.TcpipRestarted)
+        {
+            Note($"Cabo em {Sensitive.Mask(serial)}: TCP/IP já ligado; espelhando pelo cabo e conectando o Wi-Fi em segundo plano");
+            await ReleaseAsync(serial, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        Note($"Cabo em {Sensitive.Mask(serial)}: ligando o TCP/IP (o adb do celular reinicia; o espelhamento abre quando o cabo voltar)");
+        hold.TcpipDone = true;
+        if (hold.SawUsbDrop && UsbReady(serial))
+        {
+            await ReleaseAsync(serial, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Se o USB não cair logo, o adbd reiniciou rápido demais para o monitor ver: considera estável.
+        _background.Add(ReleaseLaterAsync(serial, hold.Generation, _options.UsbStableWindow, ReleaseReason.UsbStable));
+    }
+
+    private async Task OnReleaseTimerAsync(ReleaseHoldMessage message, CancellationToken cancellationToken)
+    {
+        if (!_holds.TryGetValue(message.Serial, out var hold) || hold.Generation != message.Generation)
+        {
+            return;
+        }
+
+        switch (message.Reason)
+        {
+            case ReleaseReason.UsbStable when !hold.SawUsbDrop && UsbReady(message.Serial):
+                await ReleaseAsync(message.Serial, cancellationToken).ConfigureAwait(false);
+                break;
+            case ReleaseReason.Limit:
+                Note($"{Sensitive.Mask(message.Serial)} não ficou pronto em {_options.HoldLimit.TotalSeconds:0} s; abrindo com o que há");
+                await ReleaseAsync(message.Serial, cancellationToken).ConfigureAwait(false);
+                break;
+        }
     }
 
     private async Task OnPreparedAsync(PreparedMessage message, CancellationToken cancellationToken)
@@ -421,33 +516,19 @@ public sealed class ConnectionCoordinator
             Note($"Não deu para preparar o Wi-Fi de {Sensitive.Mask(serial)}; seguindo pelo cabo");
         }
 
-        if (!_holds.TryGetValue(serial, out var hold))
-        {
-            return;
-        }
-
-        _logger.LogInformation(
-            "Tempo {Phone}: preparação terminou {Seconds:0.000} s depois do cabo (USB {Usb})",
-            Sensitive.Mask(serial),
-            _time.GetElapsedTime(hold.StartedTimestamp).TotalSeconds,
-            UsbReady(serial) ? "pronto" : "ainda fora");
-        hold.Prepared = true;
-        if (UsbReady(serial) || message.Result is not { TcpipEnabled: true })
+        // Ainda segurando (sem Wi-Fi, não respondeu, tcpip falhou): não há o que esperar.
+        if (_holds.ContainsKey(serial))
         {
             await ReleaseAsync(serial, cancellationToken).ConfigureAwait(false);
-            return;
         }
-
-        // O tcpip derrubou a conexão USB; espera um pouco ela voltar para o espelhamento abrir pelo cabo.
-        _background.Add(ReleaseLaterAsync(serial, hold.Generation));
     }
 
-    private async Task ReleaseLaterAsync(string serial, int generation)
+    private async Task ReleaseLaterAsync(string serial, int generation, TimeSpan delay, ReleaseReason reason)
     {
         try
         {
-            await Task.Delay(_options.UsbReturnGrace, _time, _stopToken).ConfigureAwait(false);
-            _inbox.Writer.TryWrite(new ReleaseHoldMessage(serial, generation));
+            await Task.Delay(delay, _time, _stopToken).ConfigureAwait(false);
+            _inbox.Writer.TryWrite(new ReleaseHoldMessage(serial, generation, reason));
         }
         catch (OperationCanceledException)
         {
@@ -672,7 +753,20 @@ public sealed class ConnectionCoordinator
         /// <summary>Quando o cabo foi visto (para o diagnóstico de tempos).</summary>
         public long StartedTimestamp { get; } = startedTimestamp;
 
-        public bool Prepared { get; set; }
+        /// <summary>O tcpip rodou: o adbd do celular está reiniciando.</summary>
+        public bool TcpipDone { get; set; }
+
+        /// <summary>A conexão USB caiu (sumiu ou saiu de "device") enquanto segurava.</summary>
+        public bool SawUsbDrop { get; set; }
+    }
+
+    private enum ReleaseReason
+    {
+        /// <summary>Depois do tcpip, o USB não caiu: considera estável.</summary>
+        UsbStable,
+
+        /// <summary>Limite de <see cref="ConnectionCoordinatorOptions.HoldLimit"/>.</summary>
+        Limit,
     }
 
     private sealed class ReconnectState(DateTimeOffset nextAttempt, TimeSpan delay)
@@ -694,7 +788,9 @@ public sealed class ConnectionCoordinator
 
     private sealed record PreparedMessage(string Serial, WifiPreparation? Result) : Message;
 
-    private sealed record ReleaseHoldMessage(string Serial, int Generation) : Message;
+    private sealed record ReleaseHoldMessage(string Serial, int Generation, ReleaseReason Reason) : Message;
+
+    private sealed record ReadyMessage(string Serial, bool TcpipRestarted) : Message;
 
     private sealed record ReconnectTickMessage : Message;
 

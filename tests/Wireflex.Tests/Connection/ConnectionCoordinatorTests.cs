@@ -18,8 +18,9 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     private const string Phone = "TESTSERIAL01";
     private const string Ip = "192.0.2.10";
     private const string WifiSerial = "192.0.2.10:5555";
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan Grace = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan SettleDelay = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan StableWindow = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan HoldLimit = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
 
     private readonly TimerTrackingTimeProvider _time = new();
@@ -52,7 +53,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task CaboSemWifi_PreparaOWifiAntesDeAbrirPeloCabo()
+    public async Task CaboSemTcpip_LigaTcpipEAbrePeloCaboAssimQueOUsbVolta()
     {
         // O tcpip reinicia o adbd: a conexão USB some e volta, e o Wi-Fi aparece.
         _adb.OnTcpip = _ =>
@@ -66,22 +67,56 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
 
         await SendAsync(new DeviceAppeared(Usb()));
 
-        // Segurando: nada abre enquanto o Wi-Fi é preparado.
-        Assert.Empty(_executor.Actions);
+        // O USB voltou: abre pelo cabo sem esperar o connect, que ainda espera o adbd reiniciar.
         Assert.Equal(1, _adb.Count("tcpip TESTSERIAL01 5555"));
-
-        await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
-        await IdleAsync();
-
+        Assert.Equal(0, _adb.Count("connect"));
         var open = Assert.IsType<OpenScrcpy>(Assert.Single(_executor.Actions));
         Assert.Equal(AdbTransport.Usb, open.Transport);
+
+        // O connect segue em segundo plano.
+        await _time.AdvanceWhenTimerCreatedAsync(SettleDelay);
+        await IdleAsync();
         Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
+        Assert.Single(_executor.Actions);
 
         var learned = Assert.Single(_catalog.Phones);
         Assert.Equal(Ip, learned.LastKnownIp);
         Assert.Equal("Celular de Teste", learned.FriendlyName);
         Assert.Equal("Test Phone", learned.Model);
         Assert.Equal(Ip, _store.Last!.FindPhone(Phone)!.LastKnownIp);
+    }
+
+    [Fact]
+    public async Task Porta5555EIpConhecido_AbreNaHoraSemTcpipEConectaDepois()
+    {
+        // O connect fica preso (ex: IP errado): o espelhamento não pode esperar por ele.
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        _adb.ConnectHangs = true;
+        Start(real: true);
+        await AdbAvailableAsync();
+
+        await SendAsync(new DeviceAppeared(Usb()));
+
+        Assert.Equal(AdbTransport.Usb, Assert.IsType<OpenScrcpy>(Assert.Single(_executor.Actions)).Transport);
+        Assert.Equal(0, _adb.Count("tcpip"));
+        Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
+    }
+
+    [Fact]
+    public async Task TcpipSemOUsbCair_SoltaDepoisDaJanelaDeEstabilidade()
+    {
+        // Sem OnTcpip: o adbd reiniciou rápido demais para o monitor ver a queda.
+        _adb.ConnectHangs = true;
+        Start(real: true);
+        await AdbAvailableAsync();
+
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Empty(_executor.Actions);
+
+        await _time.AdvanceWhenTimerCreatedAsync(StableWindow);
+        await IdleAsync();
+
+        Assert.Equal(AdbTransport.Usb, Assert.IsType<OpenScrcpy>(Assert.Single(_executor.Actions)).Transport);
     }
 
     [Fact]
@@ -197,8 +232,10 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
-    public async Task CaboNaoVoltaDepoisDoTcpip_SoltaDepoisDaToleranciaEAbrePeloWifi()
+    public async Task CaboNaoVoltaDepoisDoTcpip_NoLimiteAbreComOQueHa()
     {
+        // O USB cai e não volta; o Wi-Fi apareceu sozinho. O connect fica preso.
+        _adb.ConnectHangs = true;
         _adb.OnTcpip = _ =>
         {
             _coordinator.PostDeviceEvent(new DeviceDisappeared(Usb()));
@@ -207,18 +244,16 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         Start(real: true);
         await AdbAvailableAsync();
         await SendAsync(new DeviceAppeared(Usb()));
-        await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
-        await IdleAsync();
         Assert.Empty(_executor.Actions);
 
-        await _time.AdvanceWhenTimerCreatedAsync(Grace);
+        await _time.AdvanceWhenTimerCreatedAsync(HoldLimit);
         await IdleAsync();
 
         Assert.Equal(AdbTransport.WifiTcpip, Assert.IsType<OpenScrcpy>(Assert.Single(_executor.Actions)).Transport);
     }
 
     [Fact]
-    public async Task ConectarPeloWifiFalha_AbrePeloCabo()
+    public async Task ConectarPeloWifiFalha_JaAbriuPeloCabo()
     {
         _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
         _adb.Connect = (host, port) => new AdbConnectResult(false, $"failed to connect to {host}:{port}");
@@ -226,15 +261,9 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         await AdbAvailableAsync();
 
         await SendAsync(new DeviceAppeared(Usb()));
-        for (var i = 0; i < 4; i++)
-        {
-            await _time.AdvanceWhenTimerCreatedAsync(RetryDelay);
-        }
 
-        await IdleAsync();
-
-        Assert.Equal(5, _adb.Count("connect"));
         Assert.Equal(AdbTransport.Usb, Assert.IsType<OpenScrcpy>(Assert.Single(_executor.Actions)).Transport);
+        Assert.True(_adb.Count("connect") >= 1);
     }
 
     [Fact]
@@ -380,8 +409,9 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
             {
                 PrepareWifi = real,
                 ReconnectWifi = real,
-                ConnectRetryDelay = RetryDelay,
-                UsbReturnGrace = Grace,
+                HoldLimit = HoldLimit,
+                UsbStableWindow = StableWindow,
+                Preparer = new WifiPreparerOptions { TcpipSettleDelay = SettleDelay },
                 ReconnectInterval = Interval,
             },
             timeProvider: _time);

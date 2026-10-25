@@ -108,20 +108,59 @@ public sealed class WifiPreparerTests
     }
 
     [Fact]
-    public async Task ConexaoRecusada_TentaAteOLimite()
+    public async Task ConexaoRecusada_TentaDeNovoAteOLimite()
     {
         var adb = Scripted();
         adb.Shell["getprop service.adb.tcp.port"] = "5555";
         adb.Connect = (host, port) => new AdbConnectResult(false, $"failed to connect to {host}:{port}");
         var time = new TimerTrackingTimeProvider();
+        var options = new WifiPreparerOptions { ConnectRetryDelay = TimeSpan.FromSeconds(1), ConnectLimit = TimeSpan.FromSeconds(3) };
 
-        var prepare = new WifiPreparer(adb, timeProvider: time, connectAttempts: 3).PrepareAsync(Usb, true, CancellationToken.None);
+        var prepare = new WifiPreparer(adb, timeProvider: time, options: options).PrepareAsync(Usb, true, CancellationToken.None);
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
         await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
         await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
         var result = await prepare.WaitAsync(TestTimeouts.Real);
 
         Assert.Equal(WifiPreparationOutcome.ConnectFailed, result.Outcome);
-        Assert.Equal(3, adb.Count("connect"));
+        Assert.True(adb.Count("connect") >= 3);
+    }
+
+    [Fact]
+    public async Task ConnectTravado_DesisteDaTentativaEm3s()
+    {
+        // IP errado: o connect não responde. Cada tentativa tem limite; o total também.
+        var adb = Scripted();
+        adb.Shell["getprop service.adb.tcp.port"] = "5555";
+        adb.ConnectHangs = true;
+        var time = new TimerTrackingTimeProvider();
+        var options = new WifiPreparerOptions
+        {
+            ConnectAttemptTimeout = TimeSpan.FromSeconds(3),
+            ConnectRetryDelay = TimeSpan.FromMilliseconds(500),
+            ConnectLimit = TimeSpan.FromSeconds(8),
+        };
+
+        var prepare = new WifiPreparer(adb, timeProvider: time, options: options).PrepareAsync(Usb, true, CancellationToken.None);
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(3));
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromMilliseconds(500));
+        await WaitUntilAsync(() => adb.Count("connect") == 2);
+
+        // 3,5 s até aqui; o limite total de 8 s encerra a 2ª tentativa.
+        time.Advance(TimeSpan.FromSeconds(4.5));
+        var result = await prepare.WaitAsync(TestTimeouts.Real);
+
+        Assert.Equal(WifiPreparationOutcome.ConnectFailed, result.Outcome);
+        Assert.Equal(2, adb.Count("connect"));
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TestTimeouts.Real);
+        while (!condition())
+        {
+            await Task.Delay(5, timeout.Token);
+        }
     }
 
     [Fact]
