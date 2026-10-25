@@ -5,7 +5,8 @@ namespace Wireflex.Core.Decisions;
 
 /// <summary>
 /// Converte eventos do <see cref="DeviceMonitor"/> em entradas do <see cref="DecisionEngine"/>.
-/// Emuladores são ignorados: o Wireflex é para celulares.
+/// Ignora emuladores (o Wireflex é para celulares) e conexões Wi-Fi ainda sem serial: o motor nunca
+/// identifica um celular pelo IP. Quando o monitor descobre o serial, a conexão "aparece" já identificada.
 /// </summary>
 public static class MonitorEventTranslator
 {
@@ -22,5 +23,10 @@ public static class MonitorEventTranslator
         _ => null,
     };
 
-    private static bool IsPhone(DeviceConnection connection) => connection.Transport != AdbTransport.Emulator;
+    private static bool IsPhone(DeviceConnection connection) => connection.Transport switch
+    {
+        AdbTransport.Emulator => false,
+        AdbTransport.Usb => true,
+        _ => connection.PhoneSerial is not null,
+    };
 }

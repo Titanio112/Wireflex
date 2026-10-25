@@ -6,6 +6,7 @@ namespace Wireflex.Core.Decisions;
 public sealed record PhoneStatus(
     string Serial,
     PhonePhase Phase,
+    string? ScrcpyAdbSerial,
     AdbTransport? ScrcpyTransport,
     IReadOnlyList<PhoneConnectionStatus> Connections,
     bool Paused);

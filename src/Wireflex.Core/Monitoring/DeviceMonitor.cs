@@ -27,6 +27,7 @@ public sealed class DeviceMonitor
     private readonly Channel<DeviceEvent> _events = Channel.CreateUnbounded<DeviceEvent>();
     private readonly Dictionary<string, string> _identityCache = new(StringComparer.Ordinal);
     private Dictionary<string, DeviceConnection> _current = new(StringComparer.Ordinal);
+    private IReadOnlyList<AdbDevice>? _lastSnapshot;
     private int _started;
 
     public DeviceMonitor(
@@ -50,24 +51,27 @@ public sealed class DeviceMonitor
             throw new InvalidOperationException("O monitor já foi iniciado.");
         }
 
-        var snapshots = Channel.CreateUnbounded<IReadOnlyList<AdbDevice>>(
+        // Se o consumidor falhar, "stop" também para o produtor (e mata o track-devices).
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var items = Channel.CreateUnbounded<MonitorItem>(
             new UnboundedChannelOptions { SingleReader = true, SingleWriter = true });
-        var producer = ProduceAsync(snapshots.Writer, cancellationToken);
+        var producer = ProduceAsync(items.Writer, stop.Token);
 
         try
         {
-            await ConsumeAsync(snapshots.Reader, cancellationToken).ConfigureAwait(false);
+            await ConsumeAsync(items.Reader, stop.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         finally
         {
+            await stop.CancelAsync().ConfigureAwait(false);
             try
             {
                 await producer.ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (stop.IsCancellationRequested)
             {
             }
 
@@ -75,7 +79,7 @@ public sealed class DeviceMonitor
         }
     }
 
-    private async Task ProduceAsync(ChannelWriter<IReadOnlyList<AdbDevice>> writer, CancellationToken cancellationToken)
+    private async Task ProduceAsync(ChannelWriter<MonitorItem> writer, CancellationToken cancellationToken)
     {
         var delay = _options.InitialRetryDelay;
         var available = false;
@@ -90,16 +94,16 @@ public sealed class DeviceMonitor
                 {
                     await foreach (var snapshot in _adb.TrackDevicesAsync(cancellationToken).ConfigureAwait(false))
                     {
+                        await writer.WriteAsync(new SnapshotItem(snapshot), cancellationToken).ConfigureAwait(false);
                         if (!available)
                         {
+                            // Vai depois da foto: o consumidor aplica a foto e só então avisa que o adb está disponível.
                             available = true;
                             delay = _options.InitialRetryDelay;
                             _logger.LogInformation("Acompanhando o adb");
-                            await _events.Writer.WriteAsync(new MonitorStatusChanged(true, null), cancellationToken)
+                            await writer.WriteAsync(new StatusItem(new MonitorStatusChanged(true, null)), cancellationToken)
                                 .ConfigureAwait(false);
                         }
-
-                        await writer.WriteAsync(snapshot, cancellationToken).ConfigureAwait(false);
                     }
 
                     reason = "o acompanhamento do adb terminou (servidor caiu ou reiniciou)";
@@ -110,14 +114,14 @@ public sealed class DeviceMonitor
                 }
                 catch (Exception ex)
                 {
-                    reason = Sensitive.ScrubIpAddresses(ex.Message);
+                    reason = Sensitive.Scrub(ex.Message);
                     _logger.LogWarning(ex, "Falha ao acompanhar o adb");
                 }
 
                 if (available)
                 {
                     available = false;
-                    await _events.Writer.WriteAsync(new MonitorStatusChanged(false, reason), cancellationToken)
+                    await writer.WriteAsync(new StatusItem(new MonitorStatusChanged(false, reason)), cancellationToken)
                         .ConfigureAwait(false);
                 }
 
@@ -132,48 +136,98 @@ public sealed class DeviceMonitor
         }
     }
 
-    private async Task ConsumeAsync(ChannelReader<IReadOnlyList<AdbDevice>> reader, CancellationToken cancellationToken)
+    /// <summary>
+    /// Processa fotos e avisos na ordem em que chegam. Fotos esperam <see cref="DeviceMonitorOptions.Debounce"/>
+    /// sem novidades; um aviso de status aplica antes a foto pendente, para o status sempre refletir a foto atual.
+    /// Sem nada pendente, se houver conexão Wi-Fi sem identificação, tenta identificar de novo de tempos em tempos.
+    /// </summary>
+    private async Task ConsumeAsync(ChannelReader<MonitorItem> reader, CancellationToken cancellationToken)
     {
-        while (await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+        IReadOnlyList<AdbDevice>? pending = null;
+
+        while (true)
         {
-            IReadOnlyList<AdbDevice>? latest = null;
-            while (reader.TryRead(out var snapshot))
-            {
-                latest = snapshot;
-            }
+            TimeSpan? wait = pending is not null ? _options.Debounce
+                : NeedsIdentityRetry ? _options.IdentityRetryDelay
+                : null;
 
-            // Espera um período sem novidades; cada nova foto reinicia a espera.
-            var completed = false;
-            while (!completed)
+            if (wait is null)
             {
-                using var waitSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                var next = reader.WaitToReadAsync(waitSource.Token).AsTask();
-                var quiet = Task.Delay(_options.Debounce, _time, waitSource.Token);
-                var first = await Task.WhenAny(next, quiet).ConfigureAwait(false);
-                await waitSource.CancelAsync().ConfigureAwait(false);
-                cancellationToken.ThrowIfCancellationRequested();
-
-                if (first == quiet)
+                if (!await reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
                 {
                     break;
                 }
-
-                if (!await next.ConfigureAwait(false))
+            }
+            else
+            {
+                var outcome = await WaitForItemAsync(reader, wait.Value, cancellationToken).ConfigureAwait(false);
+                if (outcome == WaitOutcome.TimedOut)
                 {
-                    completed = true;
+                    if (pending is not null)
+                    {
+                        await ApplyAsync(pending, cancellationToken).ConfigureAwait(false);
+                        pending = null;
+                    }
+                    else if (_lastSnapshot is not null)
+                    {
+                        _logger.LogDebug("Tentando de novo identificar conexões Wi-Fi");
+                        await ApplyAsync(_lastSnapshot, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    continue;
                 }
 
-                while (reader.TryRead(out var snapshot))
+                if (outcome == WaitOutcome.Completed)
                 {
-                    latest = snapshot;
+                    break;
                 }
             }
 
-            if (latest is not null)
+            while (reader.TryRead(out var item))
             {
-                await ApplyAsync(latest, cancellationToken).ConfigureAwait(false);
+                switch (item)
+                {
+                    case SnapshotItem snapshot:
+                        pending = snapshot.Devices;
+                        break;
+                    case StatusItem status:
+                        if (pending is not null)
+                        {
+                            await ApplyAsync(pending, cancellationToken).ConfigureAwait(false);
+                            pending = null;
+                        }
+
+                        _logger.LogInformation("{Event}", Describe(status.Status));
+                        await _events.Writer.WriteAsync(status.Status, cancellationToken).ConfigureAwait(false);
+                        break;
+                }
             }
         }
+
+        if (pending is not null && !cancellationToken.IsCancellationRequested)
+        {
+            await ApplyAsync(pending, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private bool NeedsIdentityRetry => _current.Values.Any(c =>
+        c.PhoneSerial is null && c.Transport == AdbTransport.WifiTcpip && c.State == AdbDeviceState.Device);
+
+    private async Task<WaitOutcome> WaitForItemAsync(ChannelReader<MonitorItem> reader, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        using var waitSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var next = reader.WaitToReadAsync(waitSource.Token).AsTask();
+        var timer = Task.Delay(timeout, _time, waitSource.Token);
+        var first = await Task.WhenAny(next, timer).ConfigureAwait(false);
+        await waitSource.CancelAsync().ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (first == timer)
+        {
+            return WaitOutcome.TimedOut;
+        }
+
+        return await next.ConfigureAwait(false) ? WaitOutcome.ItemReady : WaitOutcome.Completed;
     }
 
     private async Task ApplyAsync(IReadOnlyList<AdbDevice> snapshot, CancellationToken cancellationToken)
@@ -193,6 +247,7 @@ public sealed class DeviceMonitor
 
         var events = DeviceSnapshotDiff.Compute(_current, next);
         _current = next;
+        _lastSnapshot = snapshot;
 
         foreach (var gone in _identityCache.Keys.Where(k => !next.ContainsKey(k)).ToList())
         {
@@ -257,11 +312,25 @@ public sealed class DeviceMonitor
         DeviceAppeared a => $"Apareceu {Mask(a.Connection)} via {a.Connection.Transport} ({a.Connection.State})",
         DeviceDisappeared d => $"Sumiu {Mask(d.Connection)} via {d.Connection.Transport}",
         DeviceStateChanged s => $"{Mask(s.Connection)} via {s.Connection.Transport}: {s.PreviousState} -> {s.Connection.State}",
-        DeviceTransportChanged t => $"{Sensitive.Mask(t.PhoneKey)} mudou de {t.PreviousTransport} para {t.CurrentTransport}",
+        DeviceTransportChanged t => $"{Sensitive.MaskAdbSerial(t.PhoneKey)} mudou de {t.PreviousTransport} para {t.CurrentTransport}",
         MonitorStatusChanged m => $"adb disponível: {m.AdbAvailable}",
         _ => e.GetType().Name,
     };
 
     private static string Mask(DeviceConnection c) =>
         c.PhoneSerial is null ? Sensitive.MaskAdbSerial(c.AdbSerial) : Sensitive.Mask(c.PhoneSerial);
+
+    /// <summary>Item da fila interna produtor -> consumidor.</summary>
+    private abstract record MonitorItem;
+
+    private sealed record SnapshotItem(IReadOnlyList<AdbDevice> Devices) : MonitorItem;
+
+    private sealed record StatusItem(MonitorStatusChanged Status) : MonitorItem;
+
+    private enum WaitOutcome
+    {
+        ItemReady,
+        TimedOut,
+        Completed,
+    }
 }

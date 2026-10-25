@@ -16,4 +16,7 @@ public sealed class DeviceMonitorOptions
 
     /// <summary>Tempo máximo para descobrir o serial real de uma conexão por Wi-Fi.</summary>
     public TimeSpan IdentityTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>Intervalo para tentar de novo identificar uma conexão Wi-Fi pronta cujo serial ainda não se sabe.</summary>
+    public TimeSpan IdentityRetryDelay { get; init; } = TimeSpan.FromSeconds(10);
 }

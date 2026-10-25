@@ -55,6 +55,7 @@ public sealed class DecisionEngine
             .Select(p => new PhoneStatus(
                 p.Serial,
                 p.Phase,
+                p.ScrcpyAdbSerial,
                 p.ScrcpyTransport,
                 p.Links.Values
                     .OrderBy(l => AdbTransports.Priority(l.Transport))
