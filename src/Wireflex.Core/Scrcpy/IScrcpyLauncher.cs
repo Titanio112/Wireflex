@@ -10,7 +10,11 @@ public interface IScrcpyLauncher
 /// <param name="PhoneSerial">Serial do celular (só para mascarar a saída do scrcpy no log).</param>
 /// <param name="AdbSerial">Conexão a usar (<c>-s</c>): serial USB ou <c>IP:porta</c>.</param>
 /// <param name="WindowTitle">Título da janela.</param>
-public sealed record ScrcpyLaunchRequest(string PhoneSerial, string AdbSerial, string WindowTitle);
+/// <param name="WindowTitleForLog">Título para o log, sem dados pessoais (ex: o nome do aparelho trocado por um marcador).</param>
+public sealed record ScrcpyLaunchRequest(string PhoneSerial, string AdbSerial, string WindowTitle, string? WindowTitleForLog = null)
+{
+    public string SafeWindowTitle => WindowTitleForLog ?? WindowTitle;
+}
 
 /// <summary>Um scrcpy rodando.</summary>
 public interface IScrcpyProcess
@@ -19,6 +23,9 @@ public interface IScrcpyProcess
 
     /// <summary>Completa com o código de saída quando o processo termina.</summary>
     Task<int> Exited { get; }
+
+    /// <summary>Título atual da janela principal do processo (vazio se ainda não abriu ou já fechou).</summary>
+    string ReadWindowTitle();
 
     /// <summary>Encerra o scrcpy (e os adb que ele abriu).</summary>
     void Kill();

@@ -24,19 +24,25 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
     private readonly Action<EngineInput> _report;
     private readonly ILogger<ScrcpyActionExecutor> _logger;
     private readonly TimeSpan _stopTimeout;
+    private readonly Func<string, string>? _windowTitleForLog;
+    private readonly TimeSpan? _windowCheckDelay;
     private readonly object _sync = new();
     private readonly Dictionary<string, Running> _running = new(StringComparer.Ordinal);
     private bool _disposed;
 
     /// <param name="windowTitle">Título da janela a partir do serial do celular.</param>
     /// <param name="report">Recebe o que aconteceu com o scrcpy, para repassar ao motor.</param>
+    /// <param name="windowTitleForLog">Título para o log, sem dados pessoais. Sem isto, usa <paramref name="windowTitle"/>.</param>
+    /// <param name="windowCheckDelay">Diagnóstico: quanto depois de abrir conferir o título da janela no log. <c>null</c> = não confere.</param>
     public ScrcpyActionExecutor(
         IScrcpyLauncher launcher,
         IUserNotifier notifier,
         Func<string, string> windowTitle,
         Action<EngineInput> report,
         ILogger<ScrcpyActionExecutor>? logger = null,
-        TimeSpan? stopTimeout = null)
+        TimeSpan? stopTimeout = null,
+        Func<string, string>? windowTitleForLog = null,
+        TimeSpan? windowCheckDelay = null)
     {
         _launcher = launcher ?? throw new ArgumentNullException(nameof(launcher));
         _notifier = notifier ?? throw new ArgumentNullException(nameof(notifier));
@@ -44,6 +50,25 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         _report = report ?? throw new ArgumentNullException(nameof(report));
         _logger = logger ?? NullLogger<ScrcpyActionExecutor>.Instance;
         _stopTimeout = stopTimeout ?? DefaultStopTimeout;
+        _windowTitleForLog = windowTitleForLog;
+        _windowCheckDelay = windowCheckDelay;
+    }
+
+    /// <summary>Um scrcpy aberto agora: para diagnóstico (comando <c>j</c> do DevConsole).</summary>
+    public sealed record WindowInfo(string Serial, string AdbSerial, int ProcessId, string ExpectedTitle, string ActualTitle);
+
+    /// <summary>Os scrcpy abertos, com o título esperado e o título real da janela de cada processo.</summary>
+    public IReadOnlyList<WindowInfo> Windows()
+    {
+        List<(string Serial, Running Running)> running;
+        lock (_sync)
+        {
+            running = _running.Select(p => (p.Key, p.Value)).ToList();
+        }
+
+        return running
+            .Select(r => new WindowInfo(r.Serial, r.Running.AdbSerial, r.Running.Process.Id, r.Running.Title, r.Running.Process.ReadWindowTitle()))
+            .ToList();
     }
 
     /// <summary>Celulares com scrcpy aberto agora.</summary>
@@ -112,9 +137,11 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         }
 
         IScrcpyProcess process;
+        var title = _windowTitle(serial);
+        var titleForLog = _windowTitleForLog?.Invoke(serial);
         try
         {
-            process = _launcher.Start(new ScrcpyLaunchRequest(serial, adbSerial, _windowTitle(serial)));
+            process = _launcher.Start(new ScrcpyLaunchRequest(serial, adbSerial, title, titleForLog));
         }
         catch (ScrcpyException ex)
         {
@@ -124,7 +151,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
             return;
         }
 
-        var running = new Running(adbSerial, process);
+        var running = new Running(adbSerial, process, title);
         lock (_sync)
         {
             _running[serial] = running;
@@ -132,6 +159,31 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
 
         _report(new ScrcpyStarted(serial, adbSerial));
         _ = process.Exited.ContinueWith(t => OnExited(serial, running, t.Result), TaskScheduler.Default);
+        if (_windowCheckDelay is { } delay)
+        {
+            _ = CheckWindowAsync(serial, running, titleForLog ?? title, delay);
+        }
+    }
+
+    /// <summary>Diagnóstico: confere no log se a janela deste processo tem o título que pedimos.</summary>
+    private async Task CheckWindowAsync(string serial, Running running, string titleForLog, TimeSpan delay)
+    {
+        await Task.Delay(delay).ConfigureAwait(false);
+        if (running.Process.Exited.IsCompleted)
+        {
+            return;
+        }
+
+        var actual = running.Process.ReadWindowTitle();
+        var matches = actual == running.Title;
+        _logger.LogInformation(
+            "Janela do scrcpy pid {Pid} ({Phone} via {Connection}): título {Result}{Actual}; esperado \"{Expected}\"",
+            running.Process.Id,
+            Sensitive.Mask(serial),
+            Sensitive.MaskAdbSerial(running.AdbSerial),
+            matches ? "confere" : "DIFERENTE",
+            matches ? string.Empty : $" (\"{Sensitive.ScrubKnown(actual, serial, running.AdbSerial)}\")",
+            titleForLog);
     }
 
     private void OnExited(string serial, Running running, int exitCode)
@@ -178,11 +230,13 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         }
     }
 
-    private sealed class Running(string adbSerial, IScrcpyProcess process)
+    private sealed class Running(string adbSerial, IScrcpyProcess process, string title)
     {
         public string AdbSerial { get; } = adbSerial;
 
         public IScrcpyProcess Process { get; } = process;
+
+        public string Title { get; } = title;
 
         public bool StoppedByUs { get; set; }
     }

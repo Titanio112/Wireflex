@@ -64,9 +64,10 @@ public sealed class ScrcpyLauncher : IScrcpyLauncher
 
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var exited = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pid = 0;
         process.Exited += (_, _) => exited.TrySetResult(SafeExitCode(process));
-        process.OutputDataReceived += (_, e) => LogOutput(request, e.Data);
-        process.ErrorDataReceived += (_, e) => LogOutput(request, e.Data);
+        process.OutputDataReceived += (_, e) => LogOutput(pid, request, e.Data);
+        process.ErrorDataReceived += (_, e) => LogOutput(pid, request, e.Data);
 
         try
         {
@@ -81,29 +82,35 @@ public sealed class ScrcpyLauncher : IScrcpyLauncher
             throw new ScrcpyException("Não foi possível iniciar o scrcpy. Confira o caminho configurado.", ex);
         }
 
+        pid = process.Id;
         _guard.Track(process);
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
         _logger.LogInformation(
-            "scrcpy aberto (pid {Pid}) para {Phone} via {Connection}",
+            "scrcpy aberto (pid {Pid}) para {Phone} via {Connection}. Argumentos: {Arguments}",
             process.Id,
             Sensitive.Mask(request.PhoneSerial),
-            Sensitive.MaskAdbSerial(request.AdbSerial));
+            Sensitive.MaskAdbSerial(request.AdbSerial),
+            string.Join(' ', BuildArguments(request with { WindowTitle = request.SafeWindowTitle })
+                .Select(a => a.Contains(' ', StringComparison.Ordinal) ? $"\"{a}\"" : a)
+                .Select(a => Sensitive.ScrubKnown(a, request.PhoneSerial, request.AdbSerial))));
 
         // O Exited não depende do fim da saída redirecionada (um adb filho do scrcpy pode mantê-la aberta).
         _ = exited.Task.ContinueWith(_ => process.Dispose(), TaskScheduler.Default);
         return new RunningScrcpy(process, exited.Task);
     }
 
-    private void LogOutput(ScrcpyLaunchRequest request, string? line)
+    private void LogOutput(int pid, ScrcpyLaunchRequest request, string? line)
     {
         if (string.IsNullOrWhiteSpace(line))
         {
             return;
         }
 
-        _logger.LogDebug("scrcpy: {Line}", Sensitive.ScrubKnown(line, request.PhoneSerial, request.AdbSerial));
+        // Com o pid: a linha "Device: ..." diz a qual celular este scrcpy se conectou de fato.
+        _logger.LogInformation("scrcpy[{Pid}] {Phone}: {Line}", pid, Sensitive.Mask(request.PhoneSerial),
+            Sensitive.ScrubKnown(line, request.PhoneSerial, request.AdbSerial));
     }
 
     private static int SafeExitCode(Process process)
@@ -123,6 +130,24 @@ public sealed class ScrcpyLauncher : IScrcpyLauncher
         public int Id { get; } = process.Id;
 
         public Task<int> Exited => exited;
+
+        public string ReadWindowTitle()
+        {
+            if (exited.IsCompleted)
+            {
+                return string.Empty;
+            }
+
+            try
+            {
+                process.Refresh();
+                return process.MainWindowTitle;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
+            {
+                return string.Empty;
+            }
+        }
 
         public void Kill()
         {

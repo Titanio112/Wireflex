@@ -99,14 +99,18 @@ var adb = new AdbClient(adbPath, loggerFactory.CreateLogger<AdbClient>());
 using var guard = options.Real ? new JobObjectProcessGuard() : null;
 
 ConnectionCoordinator? coordinator = null;
-IActionExecutor executor = options.Real
+var scrcpyExecutor = options.Real
     ? new ScrcpyActionExecutor(
         new ScrcpyLauncher(scrcpyPath!, adbPath, guard, loggerFactory.CreateLogger<ScrcpyLauncher>()),
         session,
         serial => "Wireflex - " + catalog.DisplayName(serial),
         input => coordinator?.Post(input),
-        loggerFactory.CreateLogger<ScrcpyActionExecutor>())
-    : new SimulatedActionExecutor();
+        loggerFactory.CreateLogger<ScrcpyActionExecutor>(),
+        windowTitleForLog: serial => "Wireflex - " + catalog.DisplayNameForLog(serial),
+        windowCheckDelay: TimeSpan.FromSeconds(4))
+    : null;
+IActionExecutor executor = scrcpyExecutor ?? (IActionExecutor)new SimulatedActionExecutor();
+session.Windows = scrcpyExecutor is null ? null : scrcpyExecutor.Windows;
 
 coordinator = new ConnectionCoordinator(
     new DecisionEngine(serial => config.ResolveConnectionMode(serial)),

@@ -88,13 +88,16 @@ public sealed class WifiPreparer
         if (currentPort != portText)
         {
             _logger.LogInformation("Ligando o modo TCP/IP (porta {Port}) em {Phone}", _port, Sensitive.MaskAdbSerial(usbAdbSerial));
+            var tcpipStarted = _time.GetTimestamp();
             try
             {
                 await _adb.EnableTcpipAsync(usbAdbSerial, _port, cancellationToken).ConfigureAwait(false);
                 tcpipEnabled = true;
+                LogStep(usbAdbSerial, "tcpip", tcpipStarted, "ok");
             }
             catch (Exception ex) when (ex is AdbException or IOException)
             {
+                LogStep(usbAdbSerial, "tcpip", tcpipStarted, "falhou");
                 _logger.LogWarning(ex, "Não foi possível ligar o modo TCP/IP");
                 return new WifiPreparation(ip, name, WifiPreparationOutcome.ConnectFailed, false, Sensitive.Scrub(ex.Message));
             }
@@ -109,10 +112,12 @@ public sealed class WifiPreparer
                 await Task.Delay(_connectRetryDelay, _time, cancellationToken).ConfigureAwait(false);
             }
 
+            var connectStarted = _time.GetTimestamp();
             try
             {
                 var result = await _adb.ConnectAsync(ip, _port, cancellationToken).ConfigureAwait(false);
                 detail = result.Message;
+                LogStep(usbAdbSerial, $"connect #{attempt}", connectStarted, result.Connected ? "conectou" : Sensitive.Scrub(detail));
                 if (result.Connected)
                 {
                     _logger.LogInformation("Wi-Fi conectado: {Address}", Sensitive.Mask(ip) + ":" + portText);
@@ -122,9 +127,8 @@ public sealed class WifiPreparer
             catch (Exception ex) when (ex is AdbException or IOException)
             {
                 detail = ex.Message;
+                LogStep(usbAdbSerial, $"connect #{attempt}", connectStarted, Sensitive.Scrub(detail));
             }
-
-            _logger.LogDebug("Tentativa {Attempt} de conectar por Wi-Fi falhou: {Detail}", attempt, Sensitive.Scrub(detail ?? string.Empty));
         }
 
         return new WifiPreparation(ip, name, WifiPreparationOutcome.ConnectFailed, tcpipEnabled, detail);
@@ -132,14 +136,27 @@ public sealed class WifiPreparer
 
     private async Task<string?> TryShellAsync(string adbSerial, string command, CancellationToken cancellationToken)
     {
+        var started = _time.GetTimestamp();
         try
         {
-            return await _adb.ShellAsync(adbSerial, command, cancellationToken).ConfigureAwait(false);
+            var output = await _adb.ShellAsync(adbSerial, command, cancellationToken).ConfigureAwait(false);
+            LogStep(adbSerial, command, started, "ok");
+            return output;
         }
         catch (Exception ex) when (ex is AdbException or IOException)
         {
+            LogStep(adbSerial, command, started, "falhou");
             _logger.LogDebug(ex, "Comando '{Command}' falhou em {Phone}", command, Sensitive.MaskAdbSerial(adbSerial));
             return null;
         }
     }
+
+    /// <summary>Diagnóstico: quanto cada passo da preparação levou (relógio do <see cref="TimeProvider"/>, o mesmo do Stopwatch).</summary>
+    private void LogStep(string adbSerial, string step, long startedTimestamp, string outcome) =>
+        _logger.LogInformation(
+            "Preparação {Phone}: {Step} em {Seconds:0.000} s ({Outcome})",
+            Sensitive.MaskAdbSerial(adbSerial),
+            step,
+            _time.GetElapsedTime(startedTimestamp).TotalSeconds,
+            outcome);
 }

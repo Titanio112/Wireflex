@@ -21,6 +21,7 @@ internal sealed class DevSession(WireflexConfig config, ConsoleOutput output, bo
           n [N]        responde "não" à pergunta de abrir o espelhamento
           p [N]        pausa ou retoma o celular
           m <modo>     muda o modo global em memória: auto | perguntar | nunca
+          j            janelas do scrcpy abertas: pid, conexão e título esperado x real (só no modo real)
           r            reavalia todos os celulares
           h            mostra esta ajuda
           q            sai (o mesmo que Ctrl+C)
@@ -32,6 +33,9 @@ internal sealed class DevSession(WireflexConfig config, ConsoleOutput output, bo
     private List<string> _lastListed = [];
 
     public ConnectionCoordinator? Coordinator { get; set; }
+
+    /// <summary>Janelas do scrcpy (só no modo real).</summary>
+    public Func<IReadOnlyList<ScrcpyActionExecutor.WindowInfo>>? Windows { get; set; }
 
     public void OnDeviceEvent(DeviceEvent deviceEvent) => output.Event(Format.Event(deviceEvent));
 
@@ -94,6 +98,9 @@ internal sealed class DevSession(WireflexConfig config, ConsoleOutput output, bo
                 case "m":
                     ChangeMode(argument);
                     break;
+                case "j":
+                    ListWindows();
+                    break;
                 case "f" or "x" when real:
                     output.Warning("No modo real, feche a janela do scrcpy de verdade (ou tire o cabo).");
                     break;
@@ -143,6 +150,28 @@ internal sealed class DevSession(WireflexConfig config, ConsoleOutput output, bo
         for (var i = 0; i < phones.Count; i++)
         {
             output.Plain(Format.Status(i + 1, phones[i]));
+        }
+    }
+
+    private void ListWindows()
+    {
+        if (Windows is null)
+        {
+            output.Warning("Só no modo real (--real).");
+            return;
+        }
+
+        var windows = Windows();
+        if (windows.Count == 0)
+        {
+            output.Plain("  Nenhum scrcpy aberto.");
+            return;
+        }
+
+        foreach (var w in windows)
+        {
+            var check = w.ActualTitle == w.ExpectedTitle ? "confere" : "DIFERENTE";
+            output.Plain($"  pid {w.ProcessId}: {Format.Id(w.Serial)} via {Format.Id(w.AdbSerial)} | título \"{w.ActualTitle}\" | esperado \"{w.ExpectedTitle}\" | {check}");
         }
     }
 

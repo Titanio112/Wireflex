@@ -55,6 +55,11 @@ internal sealed class FakeScrcpyProcess(int id, ScrcpyLaunchRequest request) : I
 
     public bool Running => !_exited.Task.IsCompleted;
 
+    /// <summary>Título que a janela "mostra". Padrão: o pedido.</summary>
+    public string? Title { get; set; }
+
+    public string ReadWindowTitle() => Running ? Title ?? Request.WindowTitle : string.Empty;
+
     /// <summary>Simula o processo terminando sozinho (0 = usuário fechou, 2 = celular desconectou).</summary>
     public void Exit(int code) => _exited.TrySetResult(code);
 

@@ -313,6 +313,15 @@ public sealed class ConnectionCoordinator
 
         if (_holds.TryGetValue(serial, out var hold))
         {
+            if (connection.Transport == AdbTransport.Usb)
+            {
+                _logger.LogInformation(
+                    "Tempo {Phone}: USB {State} {Seconds:0.000} s depois do cabo",
+                    Sensitive.Mask(serial),
+                    _connections.ContainsKey(connection.AdbSerial) ? connection.State.ToString() : "sumiu",
+                    _time.GetElapsedTime(hold.StartedTimestamp).TotalSeconds);
+            }
+
             // Segurando: o motor só fica sabendo quando a preparação terminar (e o cabo voltar).
             if (hold.Prepared && UsbReady(serial))
             {
@@ -357,7 +366,7 @@ public sealed class ConnectionCoordinator
 
         if (connectWifi)
         {
-            _holds[serial] = new Hold(++_holdGeneration);
+            _holds[serial] = new Hold(++_holdGeneration, _time.GetTimestamp());
             Note($"Cabo plugado em {Sensitive.Mask(serial)}: preparando o Wi-Fi (o espelhamento abre em seguida)");
         }
 
@@ -404,6 +413,11 @@ public sealed class ConnectionCoordinator
             return;
         }
 
+        _logger.LogInformation(
+            "Tempo {Phone}: preparação terminou {Seconds:0.000} s depois do cabo (USB {Usb})",
+            Sensitive.Mask(serial),
+            _time.GetElapsedTime(hold.StartedTimestamp).TotalSeconds,
+            UsbReady(serial) ? "pronto" : "ainda fora");
         hold.Prepared = true;
         if (UsbReady(serial) || message.Result is not { TcpipEnabled: true })
         {
@@ -429,7 +443,14 @@ public sealed class ConnectionCoordinator
 
     private async Task ReleaseAsync(string serial, CancellationToken cancellationToken)
     {
-        _holds.Remove(serial);
+        if (_holds.Remove(serial, out var hold))
+        {
+            _logger.LogInformation(
+                "Tempo {Phone}: eventos liberados para o motor {Seconds:0.000} s depois do cabo",
+                Sensitive.Mask(serial),
+                _time.GetElapsedTime(hold.StartedTimestamp).TotalSeconds);
+        }
+
         if (!HasUsb(serial))
         {
             _prepared.Remove(serial);
@@ -630,9 +651,12 @@ public sealed class ConnectionCoordinator
         }
     }
 
-    private sealed class Hold(int generation)
+    private sealed class Hold(int generation, long startedTimestamp)
     {
         public int Generation { get; } = generation;
+
+        /// <summary>Quando o cabo foi visto (para o diagnóstico de tempos).</summary>
+        public long StartedTimestamp { get; } = startedTimestamp;
 
         public bool Prepared { get; set; }
     }

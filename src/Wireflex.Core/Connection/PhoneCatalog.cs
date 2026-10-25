@@ -63,6 +63,15 @@ public sealed class PhoneCatalog
         return phone?.FriendlyName ?? phone?.Model ?? "celular " + Sensitive.Mask(serial);
     }
 
+    /// <summary>
+    /// <see cref="DisplayName"/> para o log: o nome do aparelho costuma ter o nome do dono, então vira um marcador.
+    /// </summary>
+    public string DisplayNameForLog(string serial)
+    {
+        var phone = Find(serial);
+        return phone?.FriendlyName is not null ? "[nome do aparelho]" : phone?.Model ?? "celular " + Sensitive.Mask(serial);
+    }
+
     /// <summary>Registra o que se sabe do celular. Valores <c>null</c> não apagam o que já existe.</summary>
     /// <returns><c>true</c> se algo mudou.</returns>
     public async Task<bool> LearnAsync(string serial, string? model = null, string? friendlyName = null, string? ip = null,
