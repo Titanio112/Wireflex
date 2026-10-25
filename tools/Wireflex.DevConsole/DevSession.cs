@@ -12,7 +12,7 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
 {
     public const string Help = """
         Comandos (N = número do celular em 'l'; pode omitir se houver só um):
-          l            lista os celulares e o estado de cada um no motor
+          l | ls | 1   lista os celulares e o estado de cada um no motor (L minúsculo, "ls" ou o número 1)
           f [N]        simula: o usuário fechou o scrcpy
           x [N]        simula: o scrcpy encerrou sozinho (erro ou conexão caiu)
           s [N]        responde "sim" à pergunta de abrir o espelhamento
@@ -64,7 +64,8 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
                 case "h" or "ajuda" or "?":
                     output.Plain(Help);
                     break;
-                case "l":
+                // "l" se confunde com "1" na tela; os três listam.
+                case "l" or "ls" or "1":
                     List();
                     break;
                 case "r":
