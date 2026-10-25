@@ -99,6 +99,9 @@ public sealed class ConnectionCoordinator
 
     private readonly Dictionary<string, Hold> _holds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _prepared = new(StringComparer.Ordinal);
+
+    // Preparação em andamento (inclusive o connect em segundo plano): a reconexão não tenta junto.
+    private readonly HashSet<string> _preparing = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ReconnectState> _reconnect = new(StringComparer.Ordinal);
     private bool _adbAvailable;
     private int _holdGeneration;
@@ -286,9 +289,19 @@ public sealed class ConnectionCoordinator
         {
             case MonitorStatusChanged status:
                 _adbAvailable = status.AdbAvailable;
-                if (status.AdbAvailable)
+                if (!status.AdbAvailable)
                 {
-                    await ApplyAsync(new Reevaluate(null, "servidor do adb disponível"), cancellationToken).ConfigureAwait(false);
+                    // Servidor caiu: o que se sabia das tentativas de reconexão ficou velho.
+                    _reconnect.Clear();
+                    return;
+                }
+
+                await ApplyAsync(new Reevaluate(null, "servidor do adb disponível"), cancellationToken).ConfigureAwait(false);
+
+                // Servidor novo (ou que acabou de subir) não lembra das conexões Wi-Fi: tenta já, sem esperar a rodada.
+                if (_options.ReconnectWifi)
+                {
+                    StartReconnects();
                 }
 
                 return;
@@ -403,6 +416,7 @@ public sealed class ConnectionCoordinator
             _background.Add(ReleaseLaterAsync(serial, hold.Generation, _options.HoldLimit, ReleaseReason.Limit));
         }
 
+        _preparing.Add(serial);
         _background.Add(PrepareAsync(serial, usb.AdbSerial, connectWifi));
     }
 
@@ -505,6 +519,12 @@ public sealed class ConnectionCoordinator
     private async Task OnPreparedAsync(PreparedMessage message, CancellationToken cancellationToken)
     {
         var serial = message.Serial;
+        _preparing.Remove(serial);
+        if (message.Result is { Outcome: WifiPreparationOutcome.Connected })
+        {
+            // Acabou de conectar: o Wi-Fi ainda pode não ter aparecido no monitor. A reconexão espera a rodada.
+            _reconnect[serial] = new ReconnectState(_time.GetUtcNow() + _options.ReconnectInterval, _options.ReconnectInterval);
+        }
         if (message.Result is { } result)
         {
             await _catalog.LearnAsync(serial, friendlyName: result.DeviceName, ip: result.Ip, cancellationToken: cancellationToken)
@@ -626,6 +646,7 @@ public sealed class ConnectionCoordinator
         }
     }
 
+    /// <summary>Tenta os celulares sem Wi-Fi. Quem ainda não tem espera (ex: o adb acabou de voltar) tenta já.</summary>
     private void StartReconnects()
     {
         if (!_adbAvailable)
@@ -633,7 +654,7 @@ public sealed class ConnectionCoordinator
             return;
         }
 
-        var now = _time.GetUtcNow();
+        var clock = _time.GetUtcNow();
         foreach (var phone in _catalog.Phones)
         {
             // Também com o cabo plugado: se o servidor do adb reiniciou, ele esqueceu a conexão Wi-Fi,
@@ -641,6 +662,7 @@ public sealed class ConnectionCoordinator
             if (string.IsNullOrWhiteSpace(phone.LastKnownIp)
                 || _catalog.ResolveWifiMode(phone.Serial) == WifiMode.WirelessDebugging
                 || _holds.ContainsKey(phone.Serial)
+                || _preparing.Contains(phone.Serial)
                 || _connections.Values.Any(c => c.Key == phone.Serial && c.Transport != AdbTransport.Usb))
             {
                 continue;
@@ -648,11 +670,11 @@ public sealed class ConnectionCoordinator
 
             if (!_reconnect.TryGetValue(phone.Serial, out var state))
             {
-                state = new ReconnectState(now, _options.ReconnectInterval);
+                state = new ReconnectState(clock, _options.ReconnectInterval);
                 _reconnect[phone.Serial] = state;
             }
 
-            if (state.InFlight || now < state.NextAttempt)
+            if (state.InFlight || clock < state.NextAttempt)
             {
                 continue;
             }
@@ -666,9 +688,13 @@ public sealed class ConnectionCoordinator
     {
         bool connected;
         string? detail;
+
+        // O mesmo limite curto de cada tentativa da preparação: com um IP que mudou, o connect fica preso.
+        using var attemptTimeout = new CancellationTokenSource(_options.Preparer.ConnectAttemptTimeout, _time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stopToken, attemptTimeout.Token);
         try
         {
-            var result = await _adb.ConnectAsync(ip, _options.TcpipPort, _stopToken).ConfigureAwait(false);
+            var result = await _adb.ConnectAsync(ip, _options.TcpipPort, linked.Token).ConfigureAwait(false);
             connected = result.Connected;
             detail = result.Message;
         }
@@ -676,6 +702,11 @@ public sealed class ConnectionCoordinator
         {
             connected = false;
             detail = ex.Message;
+        }
+        catch (OperationCanceledException) when (!_stopToken.IsCancellationRequested)
+        {
+            connected = false;
+            detail = $"connect não respondeu em {_options.Preparer.ConnectAttemptTimeout.TotalSeconds:0} s";
         }
         catch (OperationCanceledException)
         {

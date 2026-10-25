@@ -306,8 +306,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         Start(real: true, config);
         await AdbAvailableAsync();
 
-        // 15 s: tenta. 30 s: ainda esperando (falhou, espera dobra para 30 s). 45 s: tenta de novo.
-        await TickAsync();
+        // 0 s (adb disponível): tenta. Falhou: a espera dobra para 30 s. 15 s: ainda esperando. 30 s: tenta de novo.
         Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
         await TickAsync();
         Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
@@ -321,12 +320,50 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         var config = new WireflexConfig();
         config.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
         Start(real: true, config);
-        await AdbAvailableAsync();
         await SendAsync(new DeviceAppeared(Wifi()));
+        await AdbAvailableAsync();
 
         await TickAsync();
 
         Assert.Equal(0, _adb.Count("connect"));
+    }
+
+    [Fact]
+    public async Task Reconexao_AdbVoltou_TentaNaHoraSemEsperarARodada()
+    {
+        var config = new WireflexConfig();
+        config.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        _adb.Connect = (host, port) => new AdbConnectResult(false, $"failed to connect to {host}:{port}");
+        Start(real: true, config);
+
+        await AdbAvailableAsync();
+        Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
+
+        // Falhou (a espera dobrou para 30 s), mas o servidor do adb caiu e voltou: tenta de novo já.
+        await SendAsync(new MonitorStatusChanged(false, "teste"));
+        await SendAsync(new MonitorStatusChanged(true, null));
+        Assert.Equal(2, _adb.Count($"connect {WifiSerial}"));
+    }
+
+    [Fact]
+    public async Task Reconexao_ConnectTravado_DesisteEm3s()
+    {
+        var config = new WireflexConfig();
+        config.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        _adb.ConnectHangs = true;
+        Start(real: true, config);
+        await AdbAvailableAsync();
+        Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
+
+        // O timer da tentativa já foi criado (a tentativa começou dentro do AdbAvailableAsync).
+        _time.Advance(TimeSpan.FromSeconds(3));
+        await IdleAsync();
+        Assert.Contains(_adb.Calls, c => c.StartsWith("connect", StringComparison.Ordinal));
+
+        // Desistiu: não ficou "em andamento" para sempre; com o adb voltando, tenta de novo.
+        await SendAsync(new MonitorStatusChanged(false, "teste"));
+        await SendAsync(new MonitorStatusChanged(true, null));
+        Assert.Equal(2, _adb.Count($"connect {WifiSerial}"));
     }
 
     [Fact]

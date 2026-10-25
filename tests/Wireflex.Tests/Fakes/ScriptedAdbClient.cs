@@ -66,7 +66,8 @@ internal sealed class ScriptedAdbClient : IAdbClient
         Record($"connect {host}:{port}");
         if (ConnectHangs)
         {
-            await Task.Delay(Timeout.Infinite, cancellationToken);
+            // Sem o contexto do xUnit: o cancelamento continua na hora, como no adb real.
+            await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
         }
 
         return Connect(host, port);
