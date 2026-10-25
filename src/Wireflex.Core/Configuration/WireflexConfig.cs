@@ -62,6 +62,9 @@ public sealed class GlobalSettings
 
     /// <summary>Caminho do adb.exe (ou da pasta dele). Vazio: procura no PATH.</summary>
     public string? AdbPath { get; set; }
+
+    /// <summary>Caminho do scrcpy.exe (ou da pasta dele). Vazio: procura no PATH.</summary>
+    public string? ScrcpyPath { get; set; }
 }
 
 /// <summary>Celular aprendido. A identidade é sempre o serial, nunca o IP.</summary>

@@ -72,6 +72,18 @@ public class SensitiveTests
     }
 
     [Fact]
+    public void ScrubKnown_MasksKnownSerialsInThirdPartyOutput()
+    {
+        var line = "INFO: ADB device found:\n    -->   (usb)  TESTSERIAL01            device  Test_Phone\n    (tcpip) 192.0.2.10:5555";
+
+        var scrubbed = Sensitive.ScrubKnown(line, "TESTSERIAL01", "192.0.2.10:5555", null);
+
+        Assert.DoesNotContain("TESTSERIAL01", scrubbed);
+        Assert.DoesNotContain("192.0.2.10", scrubbed);
+        Assert.Contains("***AL01", scrubbed);
+    }
+
+    [Fact]
     public void Scrub_UsesCurrentWindowsUser()
     {
         var path = Path.Combine(@"C:\Users", Environment.UserName, "AppData");
