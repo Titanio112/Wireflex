@@ -271,10 +271,14 @@ public sealed class ConnectionCoordinator
 
                 return;
             case DeviceAppeared { Connection: var c } when MonitorEventTranslator.IsPhone(c):
+                // Eventos de aparelho só chegam com o adb no ar. Na partida eles vêm antes do aviso
+                // "adb disponível", e sem isto quem já estava no cabo não seria preparado.
+                _adbAvailable = true;
                 _connections[c.AdbSerial] = c;
                 connection = c;
                 break;
             case DeviceStateChanged { Connection: var c } when MonitorEventTranslator.IsPhone(c):
+                _adbAvailable = true;
                 _connections[c.AdbSerial] = c;
                 connection = c;
                 break;

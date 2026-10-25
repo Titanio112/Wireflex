@@ -85,6 +85,22 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task CelularJaPlugadoNaPartida_TambemPrepara()
+    {
+        // Na partida, o monitor manda os aparelhos antes do "adb disponível".
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        Start(real: true);
+
+        await SendAsync(new DeviceAppeared(Usb()));
+        await SendAsync(new MonitorStatusChanged(true, null));
+        await IdleAsync();
+
+        Assert.Equal(1, _adb.Count("shell TESTSERIAL01 ip route"));
+        Assert.Equal(1, _adb.Count($"connect {WifiSerial}"));
+        Assert.Equal(Ip, _catalog.Find(Phone)!.LastKnownIp);
+    }
+
+    [Fact]
     public async Task CaboComWifiJaConectado_TrocaNaHoraSemTcpip()
     {
         Start(real: true);
