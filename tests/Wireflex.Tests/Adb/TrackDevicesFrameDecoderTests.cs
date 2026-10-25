@@ -95,6 +95,51 @@ public class TrackDevicesFrameDecoderTests
         Assert.Throws<AdbException>(() => new TrackDevicesFrameDecoder().Append(Bytes("zzzzTESTSERIAL01\tdevice\n")));
     }
 
+    /// <summary>
+    /// Como o adb.exe entrega no Windows: o stdout está em modo texto e cada "\n" vira "\r\n",
+    /// mas o cabeçalho continua contando o tamanho ORIGINAL (só com "\n").
+    /// </summary>
+    private static string CliFrame(string payload) => Frame(payload).Replace("\n", "\r\n", StringComparison.Ordinal);
+
+    // Regressão: no celular real o cabeçalho seguinte chegava como '\n003' e o monitor reiniciava a cada mudança.
+    [Fact]
+    public void Append_WindowsCliOutput_CrLfInsidePayload()
+    {
+        var one = "TESTSERIAL01           device usb:1-1 product:testprod model:Test_Phone device:testdev transport_id:3\n";
+        var two = one + "TESTSERIAL02           unauthorized usb:1-2 transport_id:4\n";
+        var decoder = new TrackDevicesFrameDecoder();
+
+        var payloads = decoder.Append(Bytes(CliFrame(one) + CliFrame(two) + CliFrame(string.Empty) + CliFrame(one)));
+
+        Assert.Equal(new[] { one, two, string.Empty, one }, payloads);
+        Assert.Equal(2, AdbDeviceListParser.Parse(payloads[1]).Count);
+    }
+
+    [Fact]
+    public void Append_WindowsCliOutput_SplitInEveryPossiblePlace()
+    {
+        var one = "192.0.2.10:5555        device product:testprod model:Test_Phone device:testdev transport_id:5\n";
+        var stream = Bytes(CliFrame(one) + CliFrame(string.Empty) + CliFrame(one));
+
+        for (var cut = 1; cut < stream.Length; cut++)
+        {
+            var decoder = new TrackDevicesFrameDecoder();
+            var payloads = decoder.Append(stream.AsSpan(0, cut)).Concat(decoder.Append(stream.AsSpan(cut))).ToArray();
+
+            Assert.Equal(new[] { one, string.Empty, one }, payloads);
+        }
+    }
+
+    [Fact]
+    public void Append_ToleratesLineBreaksBetweenMessages()
+    {
+        var one = "TESTSERIAL01\tdevice\n";
+
+        var payloads = new TrackDevicesFrameDecoder().Append(Bytes(Frame(one) + "\n" + Frame(one) + "\r\n\r\n" + Frame(string.Empty)));
+
+        Assert.Equal(new[] { one, one, string.Empty }, payloads);
+    }
+
     [Fact]
     public void DecoderAndParser_EndToEnd()
     {
