@@ -96,6 +96,18 @@ public sealed class WifiPreparerTests
     }
 
     [Fact]
+    public async Task CelularNaoResponde_NaoDizQueEstaSemWifi()
+    {
+        var adb = Scripted();
+        adb.Shell.Clear();
+
+        var result = await new WifiPreparer(adb).PrepareAsync(Usb, connectWifi: true, CancellationToken.None);
+
+        Assert.Equal(WifiPreparationOutcome.NotResponding, result.Outcome);
+        Assert.Equal(0, adb.Count("tcpip"));
+    }
+
+    [Fact]
     public async Task ConexaoRecusada_TentaAteOLimite()
     {
         var adb = Scripted();

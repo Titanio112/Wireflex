@@ -633,6 +633,7 @@ public sealed class ConnectionCoordinator
         {
             WifiPreparationOutcome.Connected => $"Wi-Fi de {phone} pronto em {address}{(result.TcpipEnabled ? " (modo TCP/IP ligado agora)" : string.Empty)}",
             WifiPreparationOutcome.NoWifi => $"{phone} não está em nenhuma rede Wi-Fi; só pelo cabo",
+            WifiPreparationOutcome.NotResponding => $"{phone} não respondeu pelo cabo (o adb do celular pode estar reiniciando); seguindo sem Wi-Fi por enquanto",
             WifiPreparationOutcome.ConnectFailed => $"Não conectou {phone} pelo Wi-Fi ({address}): {Sensitive.Scrub(result.Detail ?? "sem resposta")}",
             _ => $"Aprendido {phone}: {address}",
         };

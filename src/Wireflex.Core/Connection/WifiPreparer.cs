@@ -19,6 +19,9 @@ public enum WifiPreparationOutcome
 
     /// <summary>Não conseguiu conectar por Wi-Fi.</summary>
     ConnectFailed,
+
+    /// <summary>O celular não respondeu pelo cabo (ex: adbd reiniciando); não dá para saber se há Wi-Fi.</summary>
+    NotResponding,
 }
 
 /// <param name="Ip">IP do Wi-Fi do celular, se descobriu.</param>
@@ -66,10 +69,17 @@ public sealed class WifiPreparer
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(usbAdbSerial);
 
-        var ip = AndroidShellParser.ParseWifiIpFromRoutes(await TryShellAsync(usbAdbSerial, "ip route", cancellationToken).ConfigureAwait(false))
-            ?? AndroidShellParser.ParseInetAddress(await TryShellAsync(usbAdbSerial, "ip -f inet addr show wlan0", cancellationToken).ConfigureAwait(false));
+        var routes = await TryShellAsync(usbAdbSerial, "ip route", cancellationToken).ConfigureAwait(false);
+        var ip = AndroidShellParser.ParseWifiIpFromRoutes(routes);
+        var addresses = ip is null
+            ? await TryShellAsync(usbAdbSerial, "ip -f inet addr show wlan0", cancellationToken).ConfigureAwait(false)
+            : null;
+        ip ??= AndroidShellParser.ParseInetAddress(addresses);
         var name = AndroidShellParser.ParseDeviceName(
             await TryShellAsync(usbAdbSerial, "settings get global device_name", cancellationToken).ConfigureAwait(false));
+
+        // Nenhum dos dois comandos respondeu: não dá para saber se há Wi-Fi (ex: adbd reiniciando).
+        var responded = routes is not null || addresses is not null;
 
         if (!connectWifi)
         {
@@ -78,8 +88,11 @@ public sealed class WifiPreparer
 
         if (ip is null)
         {
-            _logger.LogInformation("{Phone} não está em nenhuma rede Wi-Fi", Sensitive.MaskAdbSerial(usbAdbSerial));
-            return new WifiPreparation(null, name, WifiPreparationOutcome.NoWifi, TcpipEnabled: false);
+            _logger.LogInformation(
+                responded ? "{Phone} não está em nenhuma rede Wi-Fi" : "{Phone} não respondeu pelo cabo",
+                Sensitive.MaskAdbSerial(usbAdbSerial));
+            return new WifiPreparation(
+                null, name, responded ? WifiPreparationOutcome.NoWifi : WifiPreparationOutcome.NotResponding, TcpipEnabled: false);
         }
 
         var portText = _port.ToString(System.Globalization.CultureInfo.InvariantCulture);
