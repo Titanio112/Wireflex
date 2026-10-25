@@ -17,6 +17,8 @@ namespace Wireflex.Core.Execution;
 public sealed class ScrcpyActionExecutor : IActionExecutor
 {
     private static readonly TimeSpan DefaultStopTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan WindowCheckInterval = TimeSpan.FromMilliseconds(500);
+    private static readonly TimeSpan WindowCheckLimit = TimeSpan.FromSeconds(15);
 
     private readonly IScrcpyLauncher _launcher;
     private readonly IUserNotifier _notifier;
@@ -35,7 +37,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
     /// <param name="windowTitle">Título da janela a partir do serial do celular.</param>
     /// <param name="report">Recebe o que aconteceu com o scrcpy, para repassar ao motor.</param>
     /// <param name="windowTitleForLog">Título para o log, sem dados pessoais. Sem isto, usa <paramref name="windowTitle"/>.</param>
-    /// <param name="windowCheckDelay">Diagnóstico: quanto depois de abrir conferir o título da janela no log. <c>null</c> = não confere.</param>
+    /// <param name="windowCheckDelay">Diagnóstico: quanto depois de abrir começar a conferir o título da janela no log. <c>null</c> = não confere.</param>
     /// <param name="timeProvider">Relógio para medir quanto tempo cada scrcpy ficou aberto (os testes usam um falso).</param>
     /// <param name="ports">Escolhe a porta local de cada scrcpy (uma por janela aberta).</param>
     public ScrcpyActionExecutor(
@@ -179,22 +181,50 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         }
     }
 
-    /// <summary>Diagnóstico: confere no log se a janela deste processo tem o título que pedimos.</summary>
+    /// <summary>
+    /// Diagnóstico: confere no log se a janela deste processo tem o título que pedimos. A janela só existe
+    /// depois que o servidor do scrcpy sobe no celular (uns 3 s no teste), então tenta de novo até ela
+    /// aparecer, até <see cref="WindowCheckLimit"/> depois de abrir.
+    /// </summary>
     private async Task CheckWindowAsync(string serial, Running running, string titleForLog, TimeSpan delay)
     {
-        await Task.Delay(delay).ConfigureAwait(false);
-        if (running.Process.Exited.IsCompleted)
+        var wait = delay;
+        string actual;
+        while (true)
         {
-            return;
+            await Task.Delay(wait, _time).ConfigureAwait(false);
+            if (running.Process.Exited.IsCompleted)
+            {
+                return;
+            }
+
+            actual = running.Process.ReadWindowTitle();
+            if (actual.Length > 0)
+            {
+                break;
+            }
+
+            if (_time.GetElapsedTime(running.StartedTimestamp) >= WindowCheckLimit)
+            {
+                _logger.LogWarning(
+                    "Janela do scrcpy pid {Pid} ({Phone} via {Connection}): não apareceu em {Seconds} s",
+                    running.Process.Id,
+                    Sensitive.Mask(serial),
+                    Sensitive.MaskAdbSerial(running.AdbSerial),
+                    WindowCheckLimit.TotalSeconds);
+                return;
+            }
+
+            wait = WindowCheckInterval;
         }
 
-        var actual = running.Process.ReadWindowTitle();
         var matches = actual == running.Title;
         _logger.LogInformation(
-            "Janela do scrcpy pid {Pid} ({Phone} via {Connection}): título {Result}{Actual}; esperado \"{Expected}\"",
+            "Janela do scrcpy pid {Pid} ({Phone} via {Connection}) apareceu em {Seconds:0.0} s: título {Result}{Actual}; esperado \"{Expected}\"",
             running.Process.Id,
             Sensitive.Mask(serial),
             Sensitive.MaskAdbSerial(running.AdbSerial),
+            _time.GetElapsedTime(running.StartedTimestamp).TotalSeconds,
             matches ? "confere" : "DIFERENTE",
             matches ? string.Empty : $" (\"{Sensitive.ScrubKnown(actual, serial, running.AdbSerial)}\")",
             titleForLog);

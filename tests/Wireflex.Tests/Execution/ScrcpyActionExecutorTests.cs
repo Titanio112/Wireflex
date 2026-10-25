@@ -129,6 +129,46 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task ConferenciaDaJanela_EsperaAJanelaAparecer()
+    {
+        var time = new TimerTrackingTimeProvider();
+        var logger = new RecordingLogger<ScrcpyActionExecutor>();
+        await using var executor = WindowCheckingExecutor(time, logger);
+        await executor.ExecuteAsync(new OpenScrcpy(Phone, Phone, AdbTransport.Usb));
+        _launcher.Started[0].Title = string.Empty;
+
+        // 1 s: a janela ainda não existe; confere de novo a cada 0,5 s.
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
+        await time.WaitForTimerAsync(TimeSpan.FromMilliseconds(500));
+        _launcher.Started[0].Title = null;
+        time.Advance(TimeSpan.FromMilliseconds(500));
+
+        var message = await logger.WaitForAsync(m => m.StartsWith("Janela do scrcpy", StringComparison.Ordinal));
+        Assert.Contains("confere", message);
+        Assert.DoesNotContain(logger.Messages, m => m.Contains("DIFERENTE"));
+    }
+
+    [Fact]
+    public async Task ConferenciaDaJanela_DesisteDepoisDoLimite()
+    {
+        var time = new TimerTrackingTimeProvider();
+        var logger = new RecordingLogger<ScrcpyActionExecutor>();
+        await using var executor = WindowCheckingExecutor(time, logger);
+        await executor.ExecuteAsync(new OpenScrcpy(Phone, Phone, AdbTransport.Usb));
+        _launcher.Started[0].Title = string.Empty;
+
+        // 1 s + 28 x 0,5 s = 15 s sem janela.
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
+        for (var i = 0; i < 28; i++)
+        {
+            await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromMilliseconds(500));
+        }
+
+        var message = await logger.WaitForAsync(m => m.StartsWith("Janela do scrcpy", StringComparison.Ordinal));
+        Assert.Contains("não apareceu em 15 s", message);
+    }
+
+    [Fact]
     public async Task UsuarioFechaAJanela_InformaFechadoPeloUsuario()
     {
         await OpenAsync();
@@ -251,6 +291,16 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
         Assert.Equal(Wifi, _launcher.Started[^1].Request.AdbSerial);
         Assert.True(_launcher.Started[^1].Running);
     }
+
+    private ScrcpyActionExecutor WindowCheckingExecutor(TimeProvider time, RecordingLogger<ScrcpyActionExecutor> logger) => new(
+        _launcher,
+        _notifier,
+        serial => $"Wireflex - {serial}",
+        input => _reports.Writer.TryWrite(input),
+        logger,
+        windowCheckDelay: TimeSpan.FromSeconds(1),
+        timeProvider: time,
+        ports: new ScrcpyPortAllocator(() => new HashSet<int>()));
 
     private async Task OpenAsync()
     {

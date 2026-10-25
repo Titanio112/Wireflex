@@ -1,3 +1,4 @@
+using System.Threading.Channels;
 using Microsoft.Extensions.Logging;
 
 namespace Wireflex.Tests.Fakes;
@@ -6,6 +7,7 @@ namespace Wireflex.Tests.Fakes;
 internal sealed class RecordingLogger<T> : ILogger<T>
 {
     private readonly List<string> _messages = [];
+    private readonly Channel<string> _arrived = Channel.CreateUnbounded<string>();
 
     public IReadOnlyList<string> Messages
     {
@@ -18,6 +20,20 @@ internal sealed class RecordingLogger<T> : ILogger<T>
         }
     }
 
+    /// <summary>Espera chegar uma mensagem que atenda à condição (as que chegam antes e não atendem são descartadas).</summary>
+    public async Task<string> WaitForAsync(Func<string, bool> match)
+    {
+        using var timeout = new CancellationTokenSource(TestTimeouts.Real);
+        while (true)
+        {
+            var message = await _arrived.Reader.ReadAsync(timeout.Token).ConfigureAwait(false);
+            if (match(message))
+            {
+                return message;
+            }
+        }
+    }
+
     public IDisposable? BeginScope<TState>(TState state)
         where TState : notnull => null;
 
@@ -25,9 +41,12 @@ internal sealed class RecordingLogger<T> : ILogger<T>
 
     public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
     {
+        var message = formatter(state, exception);
         lock (_messages)
         {
-            _messages.Add(formatter(state, exception));
+            _messages.Add(message);
         }
+
+        _arrived.Writer.TryWrite(message);
     }
 }

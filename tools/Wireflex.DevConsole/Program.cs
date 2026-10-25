@@ -107,7 +107,7 @@ var scrcpyExecutor = options.Real
         input => coordinator?.Post(input),
         loggerFactory.CreateLogger<ScrcpyActionExecutor>(),
         windowTitleForLog: serial => "Wireflex - " + catalog.DisplayNameForLog(serial),
-        windowCheckDelay: TimeSpan.FromSeconds(4))
+        windowCheckDelay: TimeSpan.FromSeconds(1))
     : null;
 IActionExecutor executor = scrcpyExecutor ?? (IActionExecutor)new SimulatedActionExecutor();
 session.Windows = scrcpyExecutor is null ? null : scrcpyExecutor.Windows;
