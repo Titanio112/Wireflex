@@ -61,6 +61,12 @@ public sealed class ConnectionCoordinatorOptions
 
     /// <summary>Máximo de novas tentativas seguidas por celular, até a conexão mudar ou um scrcpy ficar aberto.</summary>
     public int ScrcpyRetryLimit { get; init; } = 3;
+
+    /// <summary>
+    /// Quanto tempo o celular precisa ficar offline para o aviso sair. Logo depois de tirar o cabo o Wi-Fi costuma
+    /// ficar offline ~1 s e voltar sozinho: isso não merece aviso.
+    /// </summary>
+    public TimeSpan OfflineNoticeDelay { get; init; } = TimeSpan.FromSeconds(5);
 }
 
 /// <summary>
@@ -114,6 +120,10 @@ public sealed class ConnectionCoordinator
     // Novas tentativas de abrir o scrcpy depois de ele falhar ao iniciar.
     private readonly Dictionary<string, ScrcpyRetryState> _scrcpyRetries = new(StringComparer.Ordinal);
     private int _scrcpyRetryGeneration;
+
+    // Aviso de offline esperando para ver se o offline dura (geração por celular).
+    private readonly Dictionary<string, int> _pendingOfflineNotices = new(StringComparer.Ordinal);
+    private int _offlineNoticeGeneration;
     private bool _adbAvailable;
     private int _holdGeneration;
     private int _started;
@@ -266,6 +276,9 @@ public sealed class ConnectionCoordinator
                 break;
             case ScrcpyRetryMessage r:
                 await OnScrcpyRetryAsync(r, cancellationToken).ConfigureAwait(false);
+                break;
+            case OfflineNoticeMessage o:
+                await OnOfflineNoticeDueAsync(o, cancellationToken).ConfigureAwait(false);
                 break;
             case LearnedMessage l:
                 // Grava já: se o tcpip/connect demorar ou falhar, o IP e o nome não se perdem.
@@ -719,23 +732,84 @@ public sealed class ConnectionCoordinator
 
         foreach (var action in actions)
         {
-            // O mesmo texto que o DevConsole mostra: log e tela contam as mesmas ações.
-            _logger.LogInformation("Ação: {Action}", EngineActionText.Describe(action));
-            _observer?.OnAction(action);
-            if (action is DoNothing)
+            if (action is NotifyUser { Notice: DeviceNotice.Offline, Serial: { } serial })
             {
+                DeferOfflineNotice(serial, action);
                 continue;
             }
 
-            try
-            {
-                await _executor.ExecuteAsync(action, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "Falha ao executar {Action}", action.GetType().Name);
-            }
+            await ExecuteAsync(action, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    private async Task ExecuteAsync(EngineAction action, CancellationToken cancellationToken)
+    {
+        // O mesmo texto que o DevConsole mostra: log e tela contam as mesmas ações.
+        _logger.LogInformation("Ação: {Action}", EngineActionText.Describe(action));
+        _observer?.OnAction(action);
+        if (action is DoNothing)
+        {
+            return;
+        }
+
+        try
+        {
+            await _executor.ExecuteAsync(action, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Falha ao executar {Action}", action.GetType().Name);
+        }
+    }
+
+    /// <summary>Segura o aviso de offline: ele só sai se o celular continuar offline depois de <see cref="ConnectionCoordinatorOptions.OfflineNoticeDelay"/>.</summary>
+    private void DeferOfflineNotice(string serial, EngineAction notice)
+    {
+        var generation = ++_offlineNoticeGeneration;
+        _pendingOfflineNotices[serial] = generation;
+        _logger.LogInformation(
+            "{Phone} offline: avisa se continuar assim por {Seconds:0} s",
+            Sensitive.Mask(serial),
+            _options.OfflineNoticeDelay.TotalSeconds);
+        _background.Add(OfflineNoticeLaterAsync(serial, generation, notice));
+    }
+
+    private async Task OfflineNoticeLaterAsync(string serial, int generation, EngineAction notice)
+    {
+        try
+        {
+            await Task.Delay(_options.OfflineNoticeDelay, _time, _stopToken).ConfigureAwait(false);
+            _inbox.Writer.TryWrite(new OfflineNoticeMessage(serial, generation, notice));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task OnOfflineNoticeDueAsync(OfflineNoticeMessage message, CancellationToken cancellationToken)
+    {
+        if (!_pendingOfflineNotices.TryGetValue(message.Serial, out var generation) || generation != message.Generation)
+        {
+            return;
+        }
+
+        _pendingOfflineNotices.Remove(message.Serial);
+        PhoneStatus? status;
+        lock (_engineSync)
+        {
+            status = _engine.GetStatus().FirstOrDefault(p => p.Serial == message.Serial);
+        }
+
+        // Voltou para "device" (ou sumiu de vez) nesse meio-tempo: não avisa.
+        var stillOffline = status is { Phase: PhonePhase.OutOfRange or PhonePhase.Unavailable }
+            && status.Connections.Any(c => c.State == AdbDeviceState.Offline);
+        if (!stillOffline)
+        {
+            _logger.LogInformation("{Phone} saiu do offline em menos de {Seconds:0} s: sem aviso", Sensitive.Mask(message.Serial), _options.OfflineNoticeDelay.TotalSeconds);
+            return;
+        }
+
+        await ExecuteAsync(message.Notice, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Tenta os celulares sem Wi-Fi. Quem ainda não tem espera (ex: o adb acabou de voltar) tenta já.</summary>
@@ -912,6 +986,8 @@ public sealed class ConnectionCoordinator
     private abstract record Message;
 
     private sealed record ScrcpyRetryMessage(string Serial, int Generation) : Message;
+
+    private sealed record OfflineNoticeMessage(string Serial, int Generation, EngineAction Notice) : Message;
 
     private sealed record MonitorMessage(DeviceEvent Event) : Message;
 

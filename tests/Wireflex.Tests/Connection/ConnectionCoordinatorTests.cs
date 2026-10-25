@@ -23,6 +23,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     private static readonly TimeSpan HoldLimit = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan OfflineDelay = TimeSpan.FromSeconds(5);
 
     private readonly TimerTrackingTimeProvider _time = new();
     private readonly ScriptedAdbClient _adb = new();
@@ -565,6 +566,66 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
 
         Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
         Assert.Equal(PhonePhase.ClosedByUser, Assert.Single(_coordinator.GetStatus()).Phase);
+    }
+
+    [Fact]
+    public async Task OfflineCurto_NaoAvisa()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        // Logo depois de tirar o cabo: o Wi-Fi fica offline ~1 s e volta.
+        await SendAsync(new DeviceStateChanged(Wifi(AdbDeviceState.Offline), AdbDeviceState.Device));
+        await _time.WaitForTimerAsync(OfflineDelay);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await SendAsync(new DeviceStateChanged(Wifi(), AdbDeviceState.Offline));
+        _time.Advance(OfflineDelay);
+        await IdleAsync();
+
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+    }
+
+    [Fact]
+    public async Task OfflineLongo_AvisaUmaVezDepoisDeCincoSegundos()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        await SendAsync(new DeviceStateChanged(Wifi(AdbDeviceState.Offline), AdbDeviceState.Device));
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+
+        await _time.AdvanceWhenTimerCreatedAsync(OfflineDelay);
+        await IdleAsync();
+
+        var notice = Assert.Single(_executor.Actions.OfType<NotifyUser>());
+        Assert.Equal(DeviceNotice.Offline, notice.Notice);
+    }
+
+    [Fact]
+    public async Task OfflineVoltaEFicaOfflineDeNovo_ContaDoUltimoOffline()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        await SendAsync(new DeviceStateChanged(Wifi(AdbDeviceState.Offline), AdbDeviceState.Device));
+        await _time.WaitForTimerAsync(OfflineDelay);
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await SendAsync(new DeviceStateChanged(Wifi(), AdbDeviceState.Offline));
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await SendAsync(new DeviceStateChanged(Wifi(AdbDeviceState.Offline), AdbDeviceState.Device));
+
+        // 5 s depois do primeiro offline: o segundo só tem 3 s, ainda não avisa.
+        await _time.WaitForTimerAsync(OfflineDelay);
+        _time.Advance(TimeSpan.FromSeconds(3));
+        await IdleAsync();
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+
+        _time.Advance(TimeSpan.FromSeconds(2));
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<NotifyUser>());
     }
 
     [Fact]
