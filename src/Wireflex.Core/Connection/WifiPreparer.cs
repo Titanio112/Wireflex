@@ -1,0 +1,145 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Wireflex.Core.Adb;
+using Wireflex.Core.Logging;
+
+namespace Wireflex.Core.Connection;
+
+/// <summary>Como terminou a preparação do Wi-Fi.</summary>
+public enum WifiPreparationOutcome
+{
+    /// <summary>Só aprendeu IP e nome (o Wi-Fi já estava conectado ou o modo não é tcpip).</summary>
+    LearnedOnly,
+
+    /// <summary>Modo TCP/IP ativo e conectado por Wi-Fi.</summary>
+    Connected,
+
+    /// <summary>O celular não está em nenhuma rede Wi-Fi.</summary>
+    NoWifi,
+
+    /// <summary>Não conseguiu conectar por Wi-Fi.</summary>
+    ConnectFailed,
+}
+
+/// <param name="Ip">IP do Wi-Fi do celular, se descobriu.</param>
+/// <param name="DeviceName">Nome do aparelho (ex: "Galaxy de Fulano"), se descobriu.</param>
+/// <param name="TcpipEnabled">Se rodou <c>tcpip</c> agora (o adbd do celular reiniciou).</param>
+/// <param name="Detail">Mensagem do adb, quando houver (pode ter IP: mascare antes de mostrar).</param>
+public sealed record WifiPreparation(string? Ip, string? DeviceName, WifiPreparationOutcome Outcome, bool TcpipEnabled, string? Detail = null);
+
+/// <summary>
+/// Prepara o Wi-Fi com o celular no cabo (Modo A): aprende o IP e o nome, liga o modo TCP/IP se ainda não
+/// estiver ligado e conecta por Wi-Fi. Só comandos pelo cabo e o <c>connect</c>.
+/// </summary>
+public sealed class WifiPreparer
+{
+    public const int DefaultTcpipPort = 5555;
+
+    private readonly IAdbClient _adb;
+    private readonly ILogger<WifiPreparer> _logger;
+    private readonly TimeProvider _time;
+    private readonly int _port;
+    private readonly int _connectAttempts;
+    private readonly TimeSpan _connectRetryDelay;
+
+    public WifiPreparer(
+        IAdbClient adb,
+        ILogger<WifiPreparer>? logger = null,
+        TimeProvider? timeProvider = null,
+        int port = DefaultTcpipPort,
+        int connectAttempts = 5,
+        TimeSpan? connectRetryDelay = null)
+    {
+        _adb = adb ?? throw new ArgumentNullException(nameof(adb));
+        _logger = logger ?? NullLogger<WifiPreparer>.Instance;
+        _time = timeProvider ?? TimeProvider.System;
+        _port = port;
+        _connectAttempts = Math.Max(1, connectAttempts);
+        _connectRetryDelay = connectRetryDelay ?? TimeSpan.FromSeconds(1);
+    }
+
+    public int Port => _port;
+
+    /// <param name="usbAdbSerial">Conexão USB do celular.</param>
+    /// <param name="connectWifi"><c>false</c>: só aprende IP e nome, sem <c>tcpip</c> nem <c>connect</c>.</param>
+    public async Task<WifiPreparation> PrepareAsync(string usbAdbSerial, bool connectWifi, CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(usbAdbSerial);
+
+        var ip = AndroidShellParser.ParseWifiIpFromRoutes(await TryShellAsync(usbAdbSerial, "ip route", cancellationToken).ConfigureAwait(false))
+            ?? AndroidShellParser.ParseInetAddress(await TryShellAsync(usbAdbSerial, "ip -f inet addr show wlan0", cancellationToken).ConfigureAwait(false));
+        var name = AndroidShellParser.ParseDeviceName(
+            await TryShellAsync(usbAdbSerial, "settings get global device_name", cancellationToken).ConfigureAwait(false));
+
+        if (!connectWifi)
+        {
+            return new WifiPreparation(ip, name, WifiPreparationOutcome.LearnedOnly, TcpipEnabled: false);
+        }
+
+        if (ip is null)
+        {
+            _logger.LogInformation("{Phone} não está em nenhuma rede Wi-Fi", Sensitive.MaskAdbSerial(usbAdbSerial));
+            return new WifiPreparation(null, name, WifiPreparationOutcome.NoWifi, TcpipEnabled: false);
+        }
+
+        var portText = _port.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var currentPort = (await TryShellAsync(usbAdbSerial, "getprop service.adb.tcp.port", cancellationToken).ConfigureAwait(false))?.Trim();
+        var tcpipEnabled = false;
+        if (currentPort != portText)
+        {
+            _logger.LogInformation("Ligando o modo TCP/IP (porta {Port}) em {Phone}", _port, Sensitive.MaskAdbSerial(usbAdbSerial));
+            try
+            {
+                await _adb.EnableTcpipAsync(usbAdbSerial, _port, cancellationToken).ConfigureAwait(false);
+                tcpipEnabled = true;
+            }
+            catch (Exception ex) when (ex is AdbException or IOException)
+            {
+                _logger.LogWarning(ex, "Não foi possível ligar o modo TCP/IP");
+                return new WifiPreparation(ip, name, WifiPreparationOutcome.ConnectFailed, false, Sensitive.Scrub(ex.Message));
+            }
+        }
+
+        string? detail = null;
+        for (var attempt = 1; attempt <= _connectAttempts; attempt++)
+        {
+            if (tcpipEnabled || attempt > 1)
+            {
+                // Depois do tcpip o adbd do celular reinicia; dá um tempo antes de cada tentativa.
+                await Task.Delay(_connectRetryDelay, _time, cancellationToken).ConfigureAwait(false);
+            }
+
+            try
+            {
+                var result = await _adb.ConnectAsync(ip, _port, cancellationToken).ConfigureAwait(false);
+                detail = result.Message;
+                if (result.Connected)
+                {
+                    _logger.LogInformation("Wi-Fi conectado: {Address}", Sensitive.Mask(ip) + ":" + portText);
+                    return new WifiPreparation(ip, name, WifiPreparationOutcome.Connected, tcpipEnabled, detail);
+                }
+            }
+            catch (Exception ex) when (ex is AdbException or IOException)
+            {
+                detail = ex.Message;
+            }
+
+            _logger.LogDebug("Tentativa {Attempt} de conectar por Wi-Fi falhou: {Detail}", attempt, Sensitive.Scrub(detail ?? string.Empty));
+        }
+
+        return new WifiPreparation(ip, name, WifiPreparationOutcome.ConnectFailed, tcpipEnabled, detail);
+    }
+
+    private async Task<string?> TryShellAsync(string adbSerial, string command, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _adb.ShellAsync(adbSerial, command, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is AdbException or IOException)
+        {
+            _logger.LogDebug(ex, "Comando '{Command}' falhou em {Phone}", command, Sensitive.MaskAdbSerial(adbSerial));
+            return null;
+        }
+    }
+}
