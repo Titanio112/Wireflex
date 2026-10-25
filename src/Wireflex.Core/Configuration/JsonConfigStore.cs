@@ -63,12 +63,7 @@ public sealed class JsonConfigStore : IConfigStore
 
             try
             {
-                var root = JsonNode.Parse(text, documentOptions: DocumentOptions) as JsonObject
-                    ?? throw new JsonException("A raiz da configuração não é um objeto.");
-                var fromVersion = ConfigMigrator.Migrate(root);
-                var config = JsonSerializer.Deserialize(root, ConfigJsonContext.Default.WireflexConfig)
-                    ?? throw new JsonException("Configuração vazia.");
-                Normalize(config);
+                var config = Parse(text, out var fromVersion);
 
                 if (fromVersion < WireflexConfig.CurrentSchemaVersion)
                 {
@@ -87,6 +82,35 @@ public sealed class JsonConfigStore : IConfigStore
                 await WriteAsync(fallback, cancellationToken).ConfigureAwait(false);
                 return fallback;
             }
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Lê a configuração <b>sem gravar nada</b>: não cria o arquivo, não migra no disco, não faz <c>.bak</c>.
+    /// Retorna <c>null</c> se o arquivo não existir, não puder ser lido ou for inválido.
+    /// Para ferramentas que não podem mexer na configuração do usuário (ex: DevConsole).
+    /// </summary>
+    public async Task<WireflexConfig?> TryReadAsync(CancellationToken cancellationToken = default)
+    {
+        await _lock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!File.Exists(FilePath))
+            {
+                return null;
+            }
+
+            var text = await File.ReadAllTextAsync(FilePath, cancellationToken).ConfigureAwait(false);
+            return Parse(text, out _);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or UnsupportedConfigVersionException)
+        {
+            _logger.LogWarning(ex, "Não foi possível ler a configuração (somente leitura)");
+            return null;
         }
         finally
         {
@@ -129,16 +153,57 @@ public sealed class JsonConfigStore : IConfigStore
         File.Move(temporary, FilePath, overwrite: true);
     }
 
+    /// <summary>Interpreta e migra em memória. Lança <see cref="JsonException"/> ou <see cref="UnsupportedConfigVersionException"/>.</summary>
+    private static WireflexConfig Parse(string text, out int fromVersion)
+    {
+        try
+        {
+            var root = JsonNode.Parse(text, documentOptions: DocumentOptions) as JsonObject
+                ?? throw new JsonException("A raiz da configuração não é um objeto.");
+            fromVersion = ConfigMigrator.Migrate(root);
+            var config = JsonSerializer.Deserialize(root, ConfigJsonContext.Default.WireflexConfig)
+                ?? throw new JsonException("Configuração vazia.");
+            Normalize(config);
+            return config;
+        }
+        catch (ArgumentException ex)
+        {
+            // JsonObject lança ArgumentException quando a mesma propriedade aparece duas vezes.
+            throw new JsonException("Propriedade repetida na configuração.", ex);
+        }
+    }
+
     private static void Normalize(WireflexConfig config)
     {
         config.Global ??= new GlobalSettings();
         config.Phones ??= [];
+
+        // O conversor de enum aceita números (ex: "connectionMode": 7); valor fora da lista volta ao padrão.
+        var defaults = new GlobalSettings();
+        if (!Enum.IsDefined(config.Global.ConnectionMode))
+        {
+            config.Global.ConnectionMode = defaults.ConnectionMode;
+        }
+
+        if (!Enum.IsDefined(config.Global.WifiMode))
+        {
+            config.Global.WifiMode = defaults.WifiMode;
+        }
 
         var seen = new HashSet<string>(StringComparer.Ordinal);
         config.Phones.RemoveAll(p => p is null || string.IsNullOrWhiteSpace(p.Serial) || !seen.Add(p.Serial));
         foreach (var phone in config.Phones)
         {
             phone.Settings ??= new PhoneSettings();
+            if (phone.Settings.ConnectionMode is { } mode && !Enum.IsDefined(mode))
+            {
+                phone.Settings.ConnectionMode = null;
+            }
+
+            if (phone.Settings.WifiMode is { } wifi && !Enum.IsDefined(wifi))
+            {
+                phone.Settings.WifiMode = null;
+            }
         }
     }
 }
