@@ -171,7 +171,8 @@ internal sealed class DevSession(WireflexConfig config, ConsoleOutput output, bo
         foreach (var w in windows)
         {
             var check = w.ActualTitle == w.ExpectedTitle ? "confere" : "DIFERENTE";
-            output.Plain($"  pid {w.ProcessId}: {Format.Id(w.Serial)} via {Format.Id(w.AdbSerial)} | título \"{w.ActualTitle}\" | esperado \"{w.ExpectedTitle}\" | {check}");
+            var port = w.Port is { } p ? $" | porta {p}" : string.Empty;
+            output.Plain($"  pid {w.ProcessId}: {Format.Id(w.Serial)} via {Format.Id(w.AdbSerial)}{port} | título \"{w.ActualTitle}\" | esperado \"{w.ExpectedTitle}\" | {check}");
         }
     }
 

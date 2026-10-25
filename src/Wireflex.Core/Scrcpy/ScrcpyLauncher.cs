@@ -33,7 +33,13 @@ public sealed class ScrcpyLauncher : IScrcpyLauncher
     public static IReadOnlyList<string> BuildArguments(ScrcpyLaunchRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        return ["--serial", request.AdbSerial, "--window-title", request.WindowTitle];
+        List<string> arguments = ["--serial", request.AdbSerial, "--window-title", request.WindowTitle];
+        if (request.Port is { } port)
+        {
+            arguments.Add(FormattableString.Invariant($"--port={port}"));
+        }
+
+        return arguments;
     }
 
     public IScrcpyProcess Start(ScrcpyLaunchRequest request)

@@ -26,7 +26,8 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
             _launcher,
             _notifier,
             serial => $"Wireflex - {serial}",
-            input => _reports.Writer.TryWrite(input));
+            input => _reports.Writer.TryWrite(input),
+            ports: new ScrcpyPortAllocator(() => new HashSet<int>()));
     }
 
     public async ValueTask DisposeAsync() => await _executor.DisposeAsync();
@@ -48,6 +49,38 @@ public sealed class ScrcpyActionExecutorTests : IAsyncDisposable
         var args = ScrcpyLauncher.BuildArguments(new ScrcpyLaunchRequest(Phone, Wifi, "Wireflex - Teste"));
 
         Assert.Equal(["--serial", Wifi, "--window-title", "Wireflex - Teste"], args);
+    }
+
+    [Fact]
+    public void Argumentos_ComPorta_PassamPortProprio()
+    {
+        var args = ScrcpyLauncher.BuildArguments(new ScrcpyLaunchRequest(Phone, Wifi, "Wireflex - Teste", Port: 27200));
+
+        Assert.Equal(["--serial", Wifi, "--window-title", "Wireflex - Teste", "--port=27200"], args);
+    }
+
+    [Fact]
+    public async Task DoisCelulares_CadaScrcpyComASuaPorta()
+    {
+        await OpenAsync();
+        await _executor.ExecuteAsync(new OpenScrcpy("TESTSERIAL02", "TESTSERIAL02", AdbTransport.Usb));
+        await NextReportAsync();
+
+        var ports = _launcher.Started.Select(p => p.Request.Port).ToList();
+        Assert.All(ports, p => Assert.InRange(p!.Value, ScrcpyPortAllocator.FirstPort, ScrcpyPortAllocator.LastPort));
+        Assert.Equal(2, ports.Distinct().Count());
+        Assert.Equal(ports.Order(), _executor.Windows().Select(w => w.Port).Order());
+    }
+
+    [Fact]
+    public async Task Trocar_AbreOScrcpyNovoEmOutraPorta()
+    {
+        await OpenAsync();
+
+        await _executor.ExecuteAsync(new SwitchScrcpy(Phone, Wifi, AdbTransport.Usb, AdbTransport.WifiTcpip));
+        await NextReportAsync();
+
+        Assert.NotEqual(_launcher.Started[0].Request.Port, _launcher.Started[1].Request.Port);
     }
 
     [Theory]

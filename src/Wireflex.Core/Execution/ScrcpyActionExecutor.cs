@@ -27,6 +27,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
     private readonly Func<string, string>? _windowTitleForLog;
     private readonly TimeSpan? _windowCheckDelay;
     private readonly TimeProvider _time;
+    private readonly ScrcpyPortAllocator _ports;
     private readonly object _sync = new();
     private readonly Dictionary<string, Running> _running = new(StringComparer.Ordinal);
     private bool _disposed;
@@ -36,6 +37,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
     /// <param name="windowTitleForLog">Título para o log, sem dados pessoais. Sem isto, usa <paramref name="windowTitle"/>.</param>
     /// <param name="windowCheckDelay">Diagnóstico: quanto depois de abrir conferir o título da janela no log. <c>null</c> = não confere.</param>
     /// <param name="timeProvider">Relógio para medir quanto tempo cada scrcpy ficou aberto (os testes usam um falso).</param>
+    /// <param name="ports">Escolhe a porta local de cada scrcpy (uma por janela aberta).</param>
     public ScrcpyActionExecutor(
         IScrcpyLauncher launcher,
         IUserNotifier notifier,
@@ -45,7 +47,8 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         TimeSpan? stopTimeout = null,
         Func<string, string>? windowTitleForLog = null,
         TimeSpan? windowCheckDelay = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        ScrcpyPortAllocator? ports = null)
     {
         _launcher = launcher ?? throw new ArgumentNullException(nameof(launcher));
         _notifier = notifier ?? throw new ArgumentNullException(nameof(notifier));
@@ -56,10 +59,11 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         _windowTitleForLog = windowTitleForLog;
         _windowCheckDelay = windowCheckDelay;
         _time = timeProvider ?? TimeProvider.System;
+        _ports = ports ?? new ScrcpyPortAllocator();
     }
 
     /// <summary>Um scrcpy aberto agora: para diagnóstico (comando <c>j</c> do DevConsole).</summary>
-    public sealed record WindowInfo(string Serial, string AdbSerial, int ProcessId, string ExpectedTitle, string ActualTitle);
+    public sealed record WindowInfo(string Serial, string AdbSerial, int ProcessId, string ExpectedTitle, string ActualTitle, int? Port);
 
     /// <summary>Os scrcpy abertos, com o título esperado e o título real da janela de cada processo.</summary>
     public IReadOnlyList<WindowInfo> Windows()
@@ -71,7 +75,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         }
 
         return running
-            .Select(r => new WindowInfo(r.Serial, r.Running.AdbSerial, r.Running.Process.Id, r.Running.Title, r.Running.Process.ReadWindowTitle()))
+            .Select(r => new WindowInfo(r.Serial, r.Running.AdbSerial, r.Running.Process.Id, r.Running.Title, r.Running.Process.ReadWindowTitle(), r.Running.Port))
             .ToList();
     }
 
@@ -143,9 +147,15 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         IScrcpyProcess process;
         var title = _windowTitle(serial);
         var titleForLog = _windowTitleForLog?.Invoke(serial);
+        int? port;
+        lock (_sync)
+        {
+            port = _ports.Next(_running.Values.Where(r => r.Port is not null).Select(r => r.Port!.Value).ToList());
+        }
+
         try
         {
-            process = _launcher.Start(new ScrcpyLaunchRequest(serial, adbSerial, title, titleForLog));
+            process = _launcher.Start(new ScrcpyLaunchRequest(serial, adbSerial, title, titleForLog, port));
         }
         catch (ScrcpyException ex)
         {
@@ -155,7 +165,7 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
             return;
         }
 
-        var running = new Running(adbSerial, process, title, _time.GetTimestamp());
+        var running = new Running(adbSerial, process, title, _time.GetTimestamp(), port);
         lock (_sync)
         {
             _running[serial] = running;
@@ -240,9 +250,11 @@ public sealed class ScrcpyActionExecutor : IActionExecutor
         }
     }
 
-    private sealed class Running(string adbSerial, IScrcpyProcess process, string title, long startedTimestamp)
+    private sealed class Running(string adbSerial, IScrcpyProcess process, string title, long startedTimestamp, int? port)
     {
         public long StartedTimestamp { get; } = startedTimestamp;
+
+        public int? Port { get; } = port;
 
         public string AdbSerial { get; } = adbSerial;
 

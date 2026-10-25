@@ -11,7 +11,8 @@ public interface IScrcpyLauncher
 /// <param name="AdbSerial">Conexão a usar (<c>-s</c>): serial USB ou <c>IP:porta</c>.</param>
 /// <param name="WindowTitle">Título da janela.</param>
 /// <param name="WindowTitleForLog">Título para o log, sem dados pessoais (ex: o nome do aparelho trocado por um marcador).</param>
-public sealed record ScrcpyLaunchRequest(string PhoneSerial, string AdbSerial, string WindowTitle, string? WindowTitleForLog = null)
+/// <param name="Port">Porta local deste scrcpy (<c>--port</c>); <c>null</c> = a padrão do scrcpy. Ver <see cref="ScrcpyPortAllocator"/>.</param>
+public sealed record ScrcpyLaunchRequest(string PhoneSerial, string AdbSerial, string WindowTitle, string? WindowTitleForLog = null, int? Port = null)
 {
     public string SafeWindowTitle => WindowTitleForLog ?? WindowTitle;
 }
