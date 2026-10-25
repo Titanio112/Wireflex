@@ -121,15 +121,39 @@ public sealed class AdbClientTests
     }
 
     [Fact]
-    public async Task Track_ServidorNaoSobe_LancaAdbException()
+    public async Task Track_ServidorNaoSobe_LancaAdbExceptionDepoisDoLimite()
     {
+        var time = new TimerTrackingTimeProvider();
+        var client = new AdbClient(_server, _launcher, timeProvider: time);
         _server.Running = false;
         _launcher.OnStartServer = () => _server.Running = false;
         AcceptTrack();
 
-        await using var track = _client.TrackDevicesAsync().GetAsyncEnumerator();
+        await using var track = client.TrackDevicesAsync().GetAsyncEnumerator();
+        var next = track.MoveNextAsync().AsTask();
+        await time.WaitForTimerAsync(TimeSpan.FromMilliseconds(100));
+        time.Advance(TimeSpan.FromSeconds(3));
 
-        await Assert.ThrowsAsync<AdbException>(async () => await track.MoveNextAsync());
+        await Assert.ThrowsAsync<AdbException>(() => next.WaitAsync(TestTimeouts.Real));
+    }
+
+    [Fact]
+    public async Task Track_ServidorDemoraUmInstante_TentaDeNovoLogoSemEsperaCrescente()
+    {
+        var time = new TimerTrackingTimeProvider();
+        var client = new AdbClient(_server, _launcher, timeProvider: time);
+        _server.Running = false;
+        _launcher.OnStartServer = () => _server.RefuseNext = 2;
+        var sides = AcceptTrack();
+
+        await using var track = client.TrackDevicesAsync().GetAsyncEnumerator();
+        var next = track.MoveNextAsync().AsTask();
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromMilliseconds(100));
+        await time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromMilliseconds(100));
+        await (await sides.ReadAsync()).FrameAsync(Line);
+
+        Assert.True(await next.WaitAsync(TestTimeouts.Real));
+        Assert.Equal(1, _launcher.StartServerCalls);
     }
 
     [Fact]

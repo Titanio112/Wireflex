@@ -18,6 +18,8 @@ public sealed class AdbClient : IAdbClient
 {
     private static readonly TimeSpan CommandTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan ServerStartPollInterval = TimeSpan.FromMilliseconds(100);
+    private static readonly TimeSpan ServerStartPollLimit = TimeSpan.FromSeconds(3);
 
     private readonly IAdbServerConnector _connector;
     private readonly IAdbServerLauncher _launcher;
@@ -180,9 +182,13 @@ public sealed class AdbClient : IAdbClient
             if (serverVersion is null)
             {
                 _logger.LogInformation("O servidor do adb não está rodando; subindo com adb start-server");
+                var started = _time.GetTimestamp();
                 await _launcher.StartServerAsync(cancellationToken).ConfigureAwait(false);
-                serverVersion = await TryGetServerVersionAsync(cancellationToken).ConfigureAwait(false)
+                serverVersion = await WaitForServerAsync(cancellationToken).ConfigureAwait(false)
                     ?? throw new AdbException("O servidor do adb não respondeu depois do adb start-server.");
+                _logger.LogInformation(
+                    "Servidor do adb respondendo {Seconds:0.000} s depois do start-server",
+                    _time.GetElapsedTime(started).TotalSeconds);
             }
 
             if (_versionChecked)
@@ -206,6 +212,29 @@ public sealed class AdbClient : IAdbClient
         finally
         {
             _ensureLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Depois do <c>start-server</c>: o servidor pode levar um instante para aceitar conexões. Tenta de novo logo,
+    /// em passos curtos e fixos (sem espera crescente), por até <see cref="ServerStartPollLimit"/>.
+    /// </summary>
+    private async Task<int?> WaitForServerAsync(CancellationToken cancellationToken)
+    {
+        var started = _time.GetTimestamp();
+        while (true)
+        {
+            if (await TryGetServerVersionAsync(cancellationToken).ConfigureAwait(false) is { } version)
+            {
+                return version;
+            }
+
+            if (_time.GetElapsedTime(started) >= ServerStartPollLimit)
+            {
+                return null;
+            }
+
+            await Task.Delay(ServerStartPollInterval, _time, cancellationToken).ConfigureAwait(false);
         }
     }
 

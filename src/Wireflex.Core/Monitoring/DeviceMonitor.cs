@@ -123,6 +123,11 @@ public sealed class DeviceMonitor
                     available = false;
                     await writer.WriteAsync(new StatusItem(new MonitorStatusChanged(false, reason)), cancellationToken)
                         .ConfigureAwait(false);
+
+                    // Estava funcionando e caiu (ex: adb kill-server): a primeira nova tentativa é imediata.
+                    // Só depois de falhar de novo entra a espera crescente.
+                    _logger.LogInformation("adb indisponível ({Reason}); tentando de novo agora", reason);
+                    continue;
                 }
 
                 _logger.LogInformation("adb indisponível ({Reason}); nova tentativa em {Delay} s", reason, delay.TotalSeconds);

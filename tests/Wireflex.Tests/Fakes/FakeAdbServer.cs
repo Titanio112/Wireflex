@@ -18,6 +18,9 @@ internal sealed class FakeAdbServer : IAdbServerConnector
 
     public bool Running { get; set; } = true;
 
+    /// <summary>Recusa as próximas N conexões mesmo rodando (servidor recém-subido ainda não aceita).</summary>
+    public int RefuseNext { get; set; }
+
     public int Connections { get; private set; }
 
     public IReadOnlyList<string> Requests
@@ -89,6 +92,12 @@ internal sealed class FakeAdbServer : IAdbServerConnector
         cancellationToken.ThrowIfCancellationRequested();
         if (!Running)
         {
+            return Task.FromResult<Stream?>(null);
+        }
+
+        if (RefuseNext > 0)
+        {
+            RefuseNext--;
             return Task.FromResult<Stream?>(null);
         }
 

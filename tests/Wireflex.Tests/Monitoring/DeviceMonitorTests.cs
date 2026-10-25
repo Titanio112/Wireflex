@@ -135,11 +135,12 @@ public sealed class DeviceMonitorTests : IAsyncDisposable
         await NextEventAsync<DeviceAppeared>();
         await AssertAvailableAsync(true);
 
-        // Servidor do adb cai.
+        // Servidor do adb cai. A primeira nova tentativa é imediata (e falha).
+        _adb.AddSession().Fail(new AdbException("adb fora do ar"));
         first.End();
         await AssertAvailableAsync(false);
 
-        // Três tentativas falham: 1 s, 2 s, 4 s, e o teto de 4 s.
+        // Depois, três tentativas falham: 1 s, 2 s, 4 s, e o teto de 4 s.
         foreach (var seconds in new[] { 1, 2, 4 })
         {
             _adb.AddSession().Fail(new AdbException("adb fora do ar"));
@@ -156,17 +157,21 @@ public sealed class DeviceMonitorTests : IAsyncDisposable
         await AssertAvailableAsync(true);
 
         var calls = _adb.TrackCalls;
-        Assert.Equal(5, calls.Count);
+        Assert.Equal(6, calls.Count);
         var gaps = calls.Zip(calls.Skip(1), (a, b) => b - a).ToArray();
-        Assert.Equal(new[] { 1.0, 2.0, 4.0, 4.0 }, gaps.Select(g => g.TotalSeconds));
+        Assert.Equal(new[] { 0.0, 1.0, 2.0, 4.0, 4.0 }, gaps.Select(g => g.TotalSeconds));
 
-        // Depois de um sucesso a espera volta a 1 s.
-        var sixth = _adb.AddSession();
+        // Depois de um sucesso, cair de novo tenta na hora; se falhar, a espera recomeça em 1 s.
+        var immediate = _adb.AddSession();
+        immediate.Fail(new AdbException("adb fora do ar"));
         back.End();
         await AssertAvailableAsync(false);
+        await immediate.Attached.WaitAsync(TestTimeouts.Real);
+
+        var eighth = _adb.AddSession();
         await _time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
-        await sixth.Attached.WaitAsync(TestTimeouts.Real);
-        Assert.Equal(6, _adb.TrackCalls.Count);
+        await eighth.Attached.WaitAsync(TestTimeouts.Real);
+        Assert.Equal(8, _adb.TrackCalls.Count);
     }
 
     [Fact]
@@ -345,9 +350,9 @@ public sealed class DeviceMonitorTests : IAsyncDisposable
         Assert.Equal(1, _adb.SerialLookups);
 
         // adb cai e não volta (nenhuma sessão nova). Passa bem mais que o intervalo de nova identificação.
+        // A nova tentativa é imediata e fica esperando o adb (sem timer).
         session.End();
         await AssertAvailableAsync(false);
-        await _time.AdvanceWhenTimerCreatedAsync(TimeSpan.FromSeconds(1));
         _time.Advance(IdentityRetry * 3);
 
         // Com o adb fora, rodar "adb -s ... shell getprop" subiria o servidor por conta própria.

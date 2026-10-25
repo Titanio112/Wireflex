@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
@@ -46,6 +47,13 @@ public sealed class TcpAdbServerConnector(int port = TcpAdbServerConnector.Defau
 
     public async Task<Stream?> ConnectAsync(CancellationToken cancellationToken)
     {
+        // No Windows, conectar numa porta sem ninguém escutando leva ~2 s até a recusa. A lista de portas
+        // escutando responde na hora.
+        if (!IsListening())
+        {
+            return null;
+        }
+
         var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
         try
         {
@@ -61,6 +69,20 @@ public sealed class TcpAdbServerConnector(int port = TcpAdbServerConnector.Defau
         {
             socket.Dispose();
             throw;
+        }
+    }
+
+    private bool IsListening()
+    {
+        try
+        {
+            return IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners()
+                .Any(e => e.Port == Port && (IPAddress.IsLoopback(e.Address) || e.Address.Equals(IPAddress.Any)));
+        }
+        catch (NetworkInformationException)
+        {
+            // Sem a lista: tenta conectar e deixa a recusa responder.
+            return true;
         }
     }
 }

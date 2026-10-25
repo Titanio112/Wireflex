@@ -63,7 +63,7 @@ internal static class Format
         MonitorStatusChanged { AdbAvailable: true } =>
             "adb disponível: acompanhando os aparelhos",
         MonitorStatusChanged m =>
-            $"adb indisponível ({m.Reason}); tentando de novo com espera crescente",
+            $"adb indisponível ({m.Reason}); tentando de novo (na hora e depois com espera crescente)",
         _ => deviceEvent.GetType().Name,
     };
 
