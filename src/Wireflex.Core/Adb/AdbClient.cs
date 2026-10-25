@@ -32,7 +32,7 @@ public sealed class AdbClient : IAdbClient
         var result = await RunAsync(["devices", "-l"], ListTimeout, cancellationToken).ConfigureAwait(false);
         if (result.ExitCode != 0)
         {
-            throw new AdbException($"adb devices falhou (código {result.ExitCode}): {Sensitive.ScrubIpAddresses(result.StdErr.Trim())}");
+            throw new AdbException($"adb devices falhou (código {result.ExitCode}): {Sensitive.Scrub(result.StdErr.Trim())}");
         }
 
         return AdbDeviceListParser.Parse(result.StdOut);
@@ -85,7 +85,7 @@ public sealed class AdbClient : IAdbClient
         _logger.LogWarning(
             "adb track-devices terminou (código {ExitCode}). stderr: {Stderr}",
             process.ExitCode,
-            Sensitive.ScrubIpAddresses(stderr.ToString()));
+            Sensitive.Scrub(stderr.ToString()));
     }
 
     public async Task<string?> GetSerialNumberAsync(string adbSerial, CancellationToken cancellationToken = default)

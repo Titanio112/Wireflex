@@ -6,7 +6,7 @@ namespace Wireflex.Core.Logging;
 
 /// <summary>
 /// Grava logs em arquivos diários (<c>wireflex-AAAAMMDD.log</c>) e apaga os antigos.
-/// Todo texto passa por <see cref="Sensitive.ScrubIpAddresses"/> antes de ir para o disco.
+/// Todo texto passa por <see cref="Sensitive.Scrub"/> antes de ir para o disco.
 /// </summary>
 public sealed class FileLoggerProvider : ILoggerProvider
 {
@@ -57,7 +57,7 @@ public sealed class FileLoggerProvider : ILoggerProvider
             builder.AppendLine().Append(exception);
         }
 
-        var line = Sensitive.ScrubIpAddresses(builder.ToString()) + Environment.NewLine;
+        var line = Sensitive.Scrub(builder.ToString()) + Environment.NewLine;
 
         lock (_sync)
         {
