@@ -58,7 +58,8 @@ public sealed class ConnectionCoordinatorOptions
 /// O <c>tcpip</c> reinicia o adbd e a conexão USB some e volta; por isso os eventos daquele celular ficam
 /// retidos até o fim da preparação, e o motor recebe só a diferença (cabo primeiro).</item>
 /// <item>Tirar o cabo: o motor troca o scrcpy para o Wi-Fi. Plugar de novo: volta para o cabo.</item>
-/// <item>Reconexão: de tempos em tempos, conecta pelo último IP os celulares conhecidos fora do adb.</item>
+/// <item>Reconexão: de tempos em tempos, conecta pelo último IP os celulares conhecidos sem conexão Wi-Fi
+/// (fora do alcance, ou no cabo depois de o servidor do adb reiniciar).</item>
 /// <item>Aprende serial, modelo, nome e IP de cada celular (<see cref="PhoneCatalog"/>).</item>
 /// </list>
 /// Uso único: chame <see cref="RunAsync"/> uma vez. Ao terminar, fecha os scrcpy abertos.
@@ -298,7 +299,11 @@ public sealed class ConnectionCoordinator
 
         if (_connections.ContainsKey(connection.AdbSerial) && connection.State == AdbDeviceState.Device)
         {
-            _reconnect.Remove(serial);
+            if (connection.Transport != AdbTransport.Usb)
+            {
+                _reconnect.Remove(serial);
+            }
+
             var ip = connection.Transport == AdbTransport.WifiTcpip
                 && AdbSerialClassifier.TryParseHostPort(connection.AdbSerial, out var host, out _)
                 ? host
@@ -516,9 +521,12 @@ public sealed class ConnectionCoordinator
         var now = _time.GetUtcNow();
         foreach (var phone in _catalog.Phones)
         {
+            // Também com o cabo plugado: se o servidor do adb reiniciou, ele esqueceu a conexão Wi-Fi,
+            // e sem ela tirar o cabo derrubaria o espelhamento.
             if (string.IsNullOrWhiteSpace(phone.LastKnownIp)
                 || _catalog.ResolveWifiMode(phone.Serial) == WifiMode.WirelessDebugging
-                || _connections.Values.Any(c => c.Key == phone.Serial))
+                || _holds.ContainsKey(phone.Serial)
+                || _connections.Values.Any(c => c.Key == phone.Serial && c.Transport != AdbTransport.Usb))
             {
                 continue;
             }

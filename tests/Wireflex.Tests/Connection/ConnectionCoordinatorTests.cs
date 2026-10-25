@@ -270,6 +270,25 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Reconexao_NoCaboSemWifi_TentaOWifiDeNovo()
+    {
+        // Ex: adb kill-server com o celular no cabo; o servidor novo não lembra da conexão Wi-Fi.
+        var config = new WireflexConfig();
+        config.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        Start(real: true, config);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        await IdleAsync();
+        var afterPreparation = _adb.Count("connect");
+
+        await TickAsync();
+
+        Assert.Equal(afterPreparation + 1, _adb.Count($"connect {WifiSerial}"));
+        Assert.Equal(0, _adb.Count("tcpip"));
+    }
+
+    [Fact]
     public async Task Reconexao_AdbForaDoAr_NaoTenta()
     {
         var config = new WireflexConfig();
