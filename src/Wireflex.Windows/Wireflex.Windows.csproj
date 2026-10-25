@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Integrações com o Windows que o Core não pode ter (ex: Job Object). Sem WPF. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <!-- O código gerado pelo LibraryImport usa ponteiros. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Wireflex.Core\Wireflex.Core.csproj" />
+  </ItemGroup>
+
+</Project>
