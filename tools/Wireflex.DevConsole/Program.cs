@@ -43,9 +43,26 @@ if (options.ConnectionMode is { } mode)
     config.Global.ConnectionMode = mode;
 }
 
-var adbPath = options.AdbPath is not null
-    ? AdbLocator.Find(options.AdbPath)
-    : AdbLocator.Find(config.Global.AdbPath) ?? AdbLocator.Find(null);
+// Ordem: --adb (sem cair para outro se não existir), depois a config, depois o PATH.
+string? adbPath;
+string adbSource;
+if (options.AdbPath is not null)
+{
+    adbPath = AdbLocator.Find(options.AdbPath);
+    adbSource = "do --adb";
+}
+else if (!string.IsNullOrWhiteSpace(config.Global.AdbPath) && AdbLocator.Find(config.Global.AdbPath) is { } fromConfig)
+{
+    adbPath = fromConfig;
+    adbSource = "da configuração";
+}
+else
+{
+    // Find(null) procura no PATH.
+    adbPath = AdbLocator.Find(null);
+    adbSource = "do PATH";
+}
+
 if (adbPath is null)
 {
     output.Error(options.AdbPath is not null
@@ -54,7 +71,7 @@ if (adbPath is null)
     return 1;
 }
 
-output.Info($"adb: {adbPath}");
+output.Info($"adb ({adbSource}): {adbPath}");
 output.Info(storedConfig is null
     ? "Configuração: padrão, só em memória (nada é gravado)"
     : "Configuração: lida de %APPDATA%\\Wireflex\\config.json, só em memória (nada é gravado)");
