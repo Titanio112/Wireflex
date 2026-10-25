@@ -145,10 +145,13 @@ public sealed class DeviceMonitor
     {
         IReadOnlyList<AdbDevice>? pending = null;
 
+        // Só tenta identificar de novo com o adb no ar: com ele fora, "adb -s ... shell" subiria o servidor sozinho.
+        var adbAvailable = false;
+
         while (true)
         {
             TimeSpan? wait = pending is not null ? _options.Debounce
-                : NeedsIdentityRetry ? _options.IdentityRetryDelay
+                : adbAvailable && NeedsIdentityRetry ? _options.IdentityRetryDelay
                 : null;
 
             if (wait is null)
@@ -197,6 +200,7 @@ public sealed class DeviceMonitor
                             pending = null;
                         }
 
+                        adbAvailable = status.Status.AdbAvailable;
                         _logger.LogInformation("{Event}", Describe(status.Status));
                         await _events.Writer.WriteAsync(status.Status, cancellationToken).ConfigureAwait(false);
                         break;
