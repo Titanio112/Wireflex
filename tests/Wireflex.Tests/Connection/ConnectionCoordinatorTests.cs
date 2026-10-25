@@ -434,7 +434,26 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         Assert.True(_executor.Disposed);
     }
 
-    private void Start(bool real, WireflexConfig? stored = null)
+    [Fact]
+    public async Task CadaAcao_VaiParaOLogComOTextoDaTela()
+    {
+        var logs = new RecordingLoggerFactory();
+        var observer = new RecordingObserver();
+        Start(real: false, logs: logs, observer: observer);
+        await AdbAvailableAsync();
+
+        await SendAsync(new DeviceAppeared(Usb()));
+        await SendAsync(new DeviceDisappeared(Usb()));
+
+        // Inclusive o NaoFazerNada, que a tela mostra em cinza.
+        Assert.Contains(observer.Actions, a => a is OpenScrcpy);
+        Assert.Contains(observer.Actions, a => a is DoNothing);
+        var logged = logs.Logger.Messages.Where(m => m.StartsWith("Ação: ", StringComparison.Ordinal)).ToList();
+        Assert.Equal(observer.Actions.Select(a => "Ação: " + EngineActionText.Describe(a)), logged);
+        Assert.All(logged, m => Assert.DoesNotContain(Phone, m));
+    }
+
+    private void Start(bool real, WireflexConfig? stored = null, RecordingLoggerFactory? logs = null, IConnectionObserver? observer = null)
     {
         _catalog = new PhoneCatalog(stored ?? new WireflexConfig(), real ? _store : null);
         _coordinator = new ConnectionCoordinator(
@@ -451,6 +470,8 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
                 Preparer = new WifiPreparerOptions { TcpipSettleDelay = SettleDelay },
                 ReconnectInterval = Interval,
             },
+            observer,
+            logs,
             timeProvider: _time);
         _run = _coordinator.RunAsync(_monitor.Reader, _stop.Token);
     }
@@ -491,6 +512,39 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
 
     private static DeviceConnection Wifi(AdbDeviceState state = AdbDeviceState.Device) =>
         new(WifiSerial, Phone, AdbTransport.WifiTcpip, state, "Test Phone");
+
+    /// <summary>O que o DevConsole receberia para mostrar na tela.</summary>
+    private sealed class RecordingObserver : IConnectionObserver
+    {
+        private readonly List<EngineAction> _actions = [];
+
+        public IReadOnlyList<EngineAction> Actions
+        {
+            get
+            {
+                lock (_actions)
+                {
+                    return _actions.ToList();
+                }
+            }
+        }
+
+        public void OnDeviceEvent(DeviceEvent deviceEvent)
+        {
+        }
+
+        public void OnAction(EngineAction action)
+        {
+            lock (_actions)
+            {
+                _actions.Add(action);
+            }
+        }
+
+        public void OnNote(string message)
+        {
+        }
+    }
 
     private sealed class RecordingExecutor : IActionExecutor
     {

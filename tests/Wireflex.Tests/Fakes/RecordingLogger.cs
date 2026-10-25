@@ -50,3 +50,19 @@ internal sealed class RecordingLogger<T> : ILogger<T>
         _arrived.Writer.TryWrite(message);
     }
 }
+
+/// <summary>Todas as categorias gravam no mesmo <see cref="Logger"/>.</summary>
+internal sealed class RecordingLoggerFactory : ILoggerFactory
+{
+    public RecordingLogger<object> Logger { get; } = new();
+
+    public ILogger CreateLogger(string categoryName) => Logger;
+
+    public void AddProvider(ILoggerProvider provider)
+    {
+    }
+
+    public void Dispose()
+    {
+    }
+}

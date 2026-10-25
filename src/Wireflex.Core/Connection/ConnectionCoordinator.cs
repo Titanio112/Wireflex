@@ -629,6 +629,8 @@ public sealed class ConnectionCoordinator
 
         foreach (var action in actions)
         {
+            // O mesmo texto que o DevConsole mostra: log e tela contam as mesmas ações.
+            _logger.LogInformation("Ação: {Action}", EngineActionText.Describe(action));
             _observer?.OnAction(action);
             if (action is DoNothing)
             {
