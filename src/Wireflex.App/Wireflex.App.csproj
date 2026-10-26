@@ -6,7 +6,13 @@
     <UseWPF>true</UseWPF>
     <!-- Só para o NotifyIcon (ícone da bandeja), que vem com o .NET: nenhum pacote a mais. -->
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- Ícone próprio, gerado por tools\icon\New-WireflexIcon.ps1. -->
+    <ApplicationIcon>Assets\wireflex.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\wireflex.ico" LogicalName="Wireflex.App.wireflex.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- WinForms e WPF têm nomes iguais (Application, MessageBox): os tipos do WinForms são usados com o nome completo. -->

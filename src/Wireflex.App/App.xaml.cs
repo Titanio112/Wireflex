@@ -8,6 +8,7 @@ using Wireflex.Core.Connection;
 using Wireflex.Core.Hosting;
 using Wireflex.Core.Logging;
 using Wireflex.Core.Scrcpy;
+using Wireflex.Core.Tray;
 using Wireflex.Windows;
 
 namespace Wireflex.App;
@@ -73,7 +74,7 @@ public partial class App : Application
     private async Task StartAsync(bool simulated)
     {
         var loggerFactory = _loggerFactory!;
-        _tray = new TrayIcon(Dispatcher, System.Drawing.SystemIcons.Application, () => _ = ExitAsync());
+        _tray = new TrayIcon(Dispatcher, TrayIcon.LoadIcon(), () => _ = ExitAsync());
 
         // Simulado: lê a config sem nunca gravar e não executa nada (para testar a bandeja com celulares ligados).
         var store = new JsonConfigStore(WireflexPaths.ConfigDirectory, loggerFactory.CreateLogger<JsonConfigStore>());
@@ -86,6 +87,8 @@ public partial class App : Application
         {
             var missing = adb is null ? "adb" : "scrcpy";
             _logger!.LogError("{Tool} não encontrado na configuração nem no PATH", missing);
+            _tray.StatusMessage = $"{missing} não encontrado na configuração nem no PATH";
+            _tray.RequestRefresh();
             _tray.ShowNotification(AppInfo.Name, $"{missing} não encontrado na configuração nem no PATH.", warning: true);
             return;
         }
@@ -106,9 +109,12 @@ public partial class App : Application
             Real = !simulated,
             Catalog = catalog,
             Notifier = new TrayNotifier(() => _tray, catalog.DisplayName),
+            Observer = new TrayObserver(() => _tray),
             Guard = _guard,
             LoggerFactory = loggerFactory,
         });
+        _tray.MenuSource = () => TrayMenuModel.Build(runtime.Coordinator.GetStatus(), catalog.Phones, catalog.DisplayName);
+        _tray.RequestRefresh();
         _run = Task.Run(() => RunAsync(runtime));
     }
 
