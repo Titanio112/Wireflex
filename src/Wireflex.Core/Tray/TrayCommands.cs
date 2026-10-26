@@ -13,6 +13,9 @@ public sealed class TrayCommands(ConnectionCoordinator coordinator, PhoneCatalog
     /// <summary>Abre mesmo se o usuário tinha fechado a janela ou se o modo for perguntar.</summary>
     public void OpenNow(string serial) => coordinator.Post(new OpenRequested(serial));
 
+    /// <summary>Resposta à pergunta "abrir o espelhamento?" (diálogo ou menu). Não = só reabre ao sair do alcance e voltar.</summary>
+    public void Answer(string serial, bool accepted) => coordinator.Post(new UserAnswered(serial, accepted));
+
     /// <summary>Pausa (fecha o scrcpy e não abre) ou retoma. Só até fechar o Wireflex.</summary>
     public void SetPaused(string serial, bool paused) => coordinator.Post(new PhonePauseChanged(serial, paused));
 

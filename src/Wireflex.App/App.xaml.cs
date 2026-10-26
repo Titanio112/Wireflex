@@ -5,6 +5,7 @@ using Wireflex.Core;
 using Wireflex.Core.Adb;
 using Wireflex.Core.Configuration;
 using Wireflex.Core.Connection;
+using Wireflex.Core.Decisions;
 using Wireflex.Core.Hosting;
 using Wireflex.Core.Logging;
 using Wireflex.Core.Scrcpy;
@@ -28,6 +29,7 @@ public partial class App : Application
     private ILoggerFactory? _loggerFactory;
     private ILogger<App>? _logger;
     private TrayIcon? _tray;
+    private AskController? _questions;
     private JobObjectProcessGuard? _guard;
     private SingleInstance? _instance;
     private Task? _run;
@@ -108,12 +110,17 @@ public partial class App : Application
             ScrcpyPath = scrcpy?.Path,
             Real = !simulated,
             Catalog = catalog,
-            Notifier = new TrayNotifier(() => _tray, catalog.DisplayName),
+            Notifier = new TrayNotifier(Dispatcher, () => _tray, () => _questions, catalog.DisplayName),
             Observer = new TrayObserver(() => _tray),
             Guard = _guard,
             LoggerFactory = loggerFactory,
         });
         _tray.Commands = new TrayCommands(runtime.Coordinator, catalog);
+        _questions = new AskController(
+            () => _tray?.Commands,
+            catalog.DisplayName,
+            serial => runtime.Coordinator.GetStatus().Any(p => p.Serial == serial && p.Phase == PhonePhase.WaitingForAnswer));
+        _tray.Refreshed += _questions.Refresh;
         _tray.OnError = ex => _logger?.LogError(ex, "Falha num comando do menu");
         _tray.MenuSource = () => TrayMenuModel.Build(runtime.Coordinator.GetStatus(), catalog.Phones, catalog.DisplayName, catalog.GlobalConnectionMode);
         _tray.RequestRefresh();

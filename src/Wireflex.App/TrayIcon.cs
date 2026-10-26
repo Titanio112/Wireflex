@@ -40,6 +40,9 @@ internal sealed class TrayIcon : IDisposable
     /// <summary>O que os itens de cada celular fazem (junto com <see cref="MenuSource"/>).</summary>
     public TrayCommands? Commands { get; set; }
 
+    /// <summary>Depois de cada atualização do estado (na thread da interface).</summary>
+    public event Action? Refreshed;
+
     /// <summary>Falha de um comando do menu (para o log).</summary>
     public Action<Exception>? OnError { get; set; }
 
@@ -63,6 +66,7 @@ internal sealed class TrayIcon : IDisposable
             {
                 Volatile.Write(ref _refreshPending, 0);
                 _icon.Text = MenuSource?.Invoke().Tooltip ?? $"{AppInfo.Name}: {StatusMessage}";
+                Refreshed?.Invoke();
             });
         }
     }
@@ -123,6 +127,11 @@ internal sealed class TrayIcon : IDisposable
         {
             Enabled = phone.CanOpenNow,
         });
+        if (phone.State == TrayPhoneState.WaitingForAnswer)
+        {
+            // Responde a pergunta "abrir?" pelo menu (o "Abrir agora" acima é o sim).
+            item.DropDownItems.Add(new Forms.ToolStripMenuItem("Não abrir", null, (_, _) => Run(c => c.Answer(serial, false))));
+        }
         item.DropDownItems.Add(new Forms.ToolStripMenuItem(phone.Paused ? "Retomar" : "Pausar", null, (_, _) => Run(c => c.SetPaused(serial, !phone.Paused)))
         {
             Enabled = phone.CanPause,

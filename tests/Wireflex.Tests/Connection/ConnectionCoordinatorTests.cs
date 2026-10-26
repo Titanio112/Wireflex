@@ -766,6 +766,24 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task ModoPerguntar_RespostaPeloDialogoOuMenu()
+    {
+        Start(real: false, new WireflexConfig { Global = new GlobalSettings { ConnectionMode = ConnectionMode.Ask } });
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<AskUser>());
+
+        Commands().Answer(Phone, accepted: false);
+        await IdleAsync();
+        Assert.Equal(PhonePhase.ClosedByUser, Assert.Single(_coordinator.GetStatus()).Phase);
+
+        // Disse não, mas mudou de ideia: "Abrir agora".
+        Commands().OpenNow(Phone);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
     public async Task AbrirAgora_DepoisDeFecharAJanela()
     {
         await MirroringByCableAsync();
