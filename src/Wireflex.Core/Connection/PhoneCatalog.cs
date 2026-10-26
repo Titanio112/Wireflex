@@ -169,6 +169,23 @@ public sealed class PhoneCatalog
         await SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Muda o modo de conexão global e grava.</summary>
+    public async Task SetGlobalConnectionModeAsync(ConnectionMode mode, CancellationToken cancellationToken = default)
+    {
+        lock (_sync)
+        {
+            if (_config.Global.ConnectionMode == mode)
+            {
+                return;
+            }
+
+            _config.Global.ConnectionMode = mode;
+        }
+
+        _logger.LogInformation("Modo de conexão global: {Mode}", mode);
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>
     /// Grava o estado atual. A cópia é tirada já com a trava de gravação: com vários gravando ao mesmo tempo
     /// (bandeja e coordenador), a última gravação sempre leva o estado mais novo.

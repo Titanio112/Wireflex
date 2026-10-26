@@ -47,7 +47,8 @@ public sealed record TrayPhone(
     bool CanChangeSettings = true);
 
 /// <param name="Tooltip">Resumo curto para o tooltip do ícone (no máximo <see cref="TrayMenuModel.TooltipMaxLength"/> caracteres).</param>
-public sealed record TrayMenu(IReadOnlyList<TrayPhone> Phones, string Tooltip);
+/// <param name="GlobalMode">Modo de conexão global, marcado no menu.</param>
+public sealed record TrayMenu(IReadOnlyList<TrayPhone> Phones, string Tooltip, ConnectionMode GlobalMode = ConnectionMode.Automatic);
 
 /// <summary>
 /// Monta o conteúdo do menu da bandeja a partir do motor (celulares vistos nesta sessão) e da config (celulares
@@ -99,8 +100,15 @@ public static class TrayMenuModel
             .ThenBy(p => p.Serial, StringComparer.Ordinal)
             .ToList();
 
-        return new TrayMenu(phones, Tooltip(phones));
+        return new TrayMenu(phones, Tooltip(phones), globalMode);
     }
+
+    public static string ModeText(ConnectionMode mode) => mode switch
+    {
+        ConnectionMode.Ask => "Perguntar antes de abrir",
+        ConnectionMode.Never => "Nunca abrir",
+        _ => "Automático",
+    };
 
     private static TrayPhone Phone(string serial, string name, PhoneStatus? status, ConnectionMode? phoneMode, ConnectionMode globalMode)
     {

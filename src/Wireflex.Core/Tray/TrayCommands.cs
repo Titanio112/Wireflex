@@ -26,6 +26,13 @@ public sealed class TrayCommands(ConnectionCoordinator coordinator, PhoneCatalog
         coordinator.Post(new Reevaluate(serial, enabled ? "celular ativado" : "celular desativado"));
     }
 
+    /// <summary>Modo de conexão global (automático/perguntar/nunca): grava e reavalia todos os celulares na hora.</summary>
+    public async Task SetGlobalModeAsync(ConnectionMode mode)
+    {
+        await catalog.SetGlobalConnectionModeAsync(mode).ConfigureAwait(false);
+        coordinator.Post(new Reevaluate(null, $"modo de conexão global: {mode}"));
+    }
+
     /// <summary>Tira só este celular da config e desconecta o Wi-Fi dele. Se estiver ligado, fica ignorado até sair do alcance.</summary>
     public Task ForgetAsync(string serial) => coordinator.ForgetAsync(serial);
 }

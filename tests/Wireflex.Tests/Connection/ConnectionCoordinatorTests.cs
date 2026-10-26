@@ -743,6 +743,29 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task ModoGlobal_GravaEReavaliaTodosNaHora()
+    {
+        Start(real: true, new WireflexConfig());
+        await AdbAvailableAsync();
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Never);
+        await IdleAsync();
+        Assert.Equal(ConnectionMode.Never, _store.Last!.Global.ConnectionMode);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Ask);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<AskUser>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Automatic);
+        await IdleAsync();
+        Assert.Equal(ConnectionMode.Automatic, _store.Last!.Global.ConnectionMode);
+    }
+
+    [Fact]
     public async Task AbrirAgora_DepoisDeFecharAJanela()
     {
         await MirroringByCableAsync();

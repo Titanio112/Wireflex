@@ -1,5 +1,6 @@
 using System.Windows.Threading;
 using Wireflex.Core;
+using Wireflex.Core.Configuration;
 using Wireflex.Core.Tray;
 using Forms = System.Windows.Forms;
 
@@ -87,7 +88,8 @@ internal sealed class TrayIcon : IDisposable
         _menu.Items.Add(new Forms.ToolStripMenuItem(AppInfo.Name) { Enabled = false });
         _menu.Items.Add(new Forms.ToolStripSeparator());
 
-        if (MenuSource?.Invoke() is not { } menu)
+        var menu = MenuSource?.Invoke();
+        if (menu is null)
         {
             _menu.Items.Add(new Forms.ToolStripMenuItem(Escape(StatusMessage)) { Enabled = false });
         }
@@ -101,6 +103,12 @@ internal sealed class TrayIcon : IDisposable
             {
                 _menu.Items.Add(PhoneItem(phone));
             }
+        }
+
+        if (menu is not null && Commands is not null)
+        {
+            _menu.Items.Add(new Forms.ToolStripSeparator());
+            _menu.Items.Add(ModeItem(menu.GlobalMode));
         }
 
         _menu.Items.Add(new Forms.ToolStripSeparator());
@@ -131,6 +139,20 @@ internal sealed class TrayIcon : IDisposable
         {
             Enabled = phone.CanChangeSettings,
         });
+        return item;
+    }
+
+    private Forms.ToolStripMenuItem ModeItem(ConnectionMode current)
+    {
+        var item = new Forms.ToolStripMenuItem("Modo de conexão");
+        foreach (var mode in (ConnectionMode[])[ConnectionMode.Automatic, ConnectionMode.Ask, ConnectionMode.Never])
+        {
+            item.DropDownItems.Add(new Forms.ToolStripMenuItem(TrayMenuModel.ModeText(mode), null, (_, _) => RunAsync(c => c.SetGlobalModeAsync(mode)))
+            {
+                Checked = mode == current,
+            });
+        }
+
         return item;
     }
 
