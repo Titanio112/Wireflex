@@ -316,6 +316,32 @@ public sealed class AdbClientTests
     }
 
     [Fact]
+    public async Task Disconnect_Desconecta()
+    {
+        _server.Reply("host:disconnect:192.0.2.10:5555", "disconnected 192.0.2.10:5555");
+
+        Assert.True(await _client.DisconnectAsync("192.0.2.10", 5555));
+    }
+
+    [Fact]
+    public async Task Disconnect_ConexaoQueNaoExiste_DevolveFalse()
+    {
+        // Resposta real do servidor do adb quando não tem essa conexão.
+        _server.Fail("host:disconnect:192.0.2.10:5555", "no such device '192.0.2.10:5555'");
+
+        Assert.False(await _client.DisconnectAsync("192.0.2.10", 5555));
+    }
+
+    [Fact]
+    public async Task Disconnect_ServidorParado_NaoSobeOServidor()
+    {
+        _server.Running = false;
+
+        await Assert.ThrowsAsync<AdbException>(() => _client.DisconnectAsync("192.0.2.10", 5555));
+        Assert.Equal(0, _launcher.StartServerCalls);
+    }
+
+    [Fact]
     public void DescribeService_MascaraSerialEIp()
     {
         Assert.Equal("host:transport:***AL01", AdbWire.DescribeService("host:transport:TESTSERIAL01"));
