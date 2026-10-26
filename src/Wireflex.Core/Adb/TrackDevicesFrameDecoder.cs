@@ -9,9 +9,11 @@ namespace Wireflex.Core.Adb;
 /// Lista vazia chega como <c>0000</c>. Sem processo nem rede: recebe bytes, devolve textos.
 /// </summary>
 /// <remarks>
-/// No Windows o adb.exe escreve o stdout em modo texto: cada <c>\n</c> vira <c>\r\n</c>, mas o cabeçalho
-/// continua contando o tamanho original. Por isso todo <c>\r</c> é descartado ao receber (o conteúdo do
-/// adb nunca tem <c>\r</c> de verdade) e quebras de linha soltas antes de um cabeçalho são ignoradas.
+/// O <see cref="AdbClient"/> lê direto do socket, que manda os bytes sem alteração. A tolerância abaixo
+/// fica para quem ler a saída do adb.exe: no Windows ele escreve o stdout em modo texto (cada <c>\n</c> vira
+/// <c>\r\n</c>), mas o cabeçalho continua contando o tamanho original. Por isso todo <c>\r</c> é descartado
+/// ao receber (o conteúdo do adb nunca tem <c>\r</c> de verdade) e quebras de linha soltas antes de um
+/// cabeçalho são ignoradas.
 /// </remarks>
 public sealed class TrackDevicesFrameDecoder
 {

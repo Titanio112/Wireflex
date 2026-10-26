@@ -1,24 +1,27 @@
 using Wireflex.Core.Configuration;
+using Wireflex.Core.Connection;
 using Wireflex.Core.Decisions;
+using Wireflex.Core.Execution;
 using Wireflex.Core.Monitoring;
 
 namespace Wireflex.DevConsole;
 
 /// <summary>
-/// Liga os eventos do monitor ao motor e trata os comandos digitados. O motor não é thread-safe,
-/// então tudo que chega nele passa pelo mesmo lock.
+/// Mostra o que o coordenador faz e trata os comandos digitados. Tudo que vai para o motor passa
+/// pela fila do coordenador (<see cref="ConnectionCoordinator.Post"/>).
 /// </summary>
-internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, ConsoleOutput output)
+internal sealed class DevSession(WireflexConfig config, ConsoleOutput output, bool real) : IConnectionObserver, IUserNotifier
 {
     public const string Help = """
         Comandos (N = número do celular em 'l'; pode omitir se houver só um):
           l | ls | 1   lista os celulares e o estado de cada um no motor (L minúsculo, "ls" ou o número 1)
-          f [N]        simula: o usuário fechou o scrcpy
-          x [N]        simula: o scrcpy encerrou sozinho (erro ou conexão caiu)
+          f [N]        simula: o usuário fechou o scrcpy (só no modo simulado)
+          x [N]        simula: o scrcpy encerrou sozinho (só no modo simulado)
           s [N]        responde "sim" à pergunta de abrir o espelhamento
           n [N]        responde "não" à pergunta de abrir o espelhamento
           p [N]        pausa ou retoma o celular
           m <modo>     muda o modo global em memória: auto | perguntar | nunca
+          j            janelas do scrcpy abertas: pid, conexão e título esperado x real (só no modo real)
           r            reavalia todos os celulares
           h            mostra esta ajuda
           q            sai (o mesmo que Ctrl+C)
@@ -29,17 +32,38 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
     // Seriais na ordem do último 'l': o número digitado sempre aponta para o celular que o usuário viu.
     private List<string> _lastListed = [];
 
-    public void OnDeviceEvent(DeviceEvent deviceEvent)
+    public ConnectionCoordinator? Coordinator { get; set; }
+
+    /// <summary>Janelas do scrcpy (só no modo real).</summary>
+    public Func<IReadOnlyList<ScrcpyActionExecutor.WindowInfo>>? Windows { get; set; }
+
+    public void OnDeviceEvent(DeviceEvent deviceEvent) => output.Event(Format.Event(deviceEvent));
+
+    public void OnAction(EngineAction action)
     {
-        lock (_sync)
+        if (action is DoNothing)
         {
-            output.Event(Format.Event(deviceEvent));
-            if (MonitorEventTranslator.Translate(deviceEvent) is { } input)
-            {
-                Apply(input);
-            }
+            output.Idle(Format.Action(action));
+        }
+        else
+        {
+            output.Action(Format.Action(action) + (real ? string.Empty : " (simulado: nada é executado)"));
         }
     }
+
+    public void OnNote(string message) => output.Info(message);
+
+    // A pergunta e o aviso já aparecem como ação na tela; a resposta vem pelos comandos s/n.
+    public void Ask(AskUser request)
+    {
+    }
+
+    public void Notify(NotifyUser notice)
+    {
+    }
+
+    public void ScrcpyFailed(string serial, string message) =>
+        output.Error($"O scrcpy não abriu para {Format.Id(serial)}: {message}");
 
     /// <returns><c>false</c> quando o usuário pediu para sair.</returns>
     public bool Execute(string line)
@@ -69,10 +93,16 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
                     List();
                     break;
                 case "r":
-                    Apply(new Reevaluate(null, "pedido no DevConsole"));
+                    Post(new Reevaluate(null, "pedido no DevConsole"));
                     break;
                 case "m":
                     ChangeMode(argument);
+                    break;
+                case "j":
+                    ListWindows();
+                    break;
+                case "f" or "x" when real:
+                    output.Warning("No modo real, feche a janela do scrcpy de verdade (ou tire o cabo).");
                     break;
                 case "f":
                     WithPhone(argument, phone => phone.ScrcpyAdbSerial is { } adb
@@ -102,24 +132,13 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
         return true;
     }
 
-    private void Apply(EngineInput input)
-    {
-        foreach (var action in engine.Handle(input))
-        {
-            if (action is DoNothing)
-            {
-                output.Idle(Format.Action(action));
-            }
-            else
-            {
-                output.Action(Format.Action(action) + " (simulado: nada é executado)");
-            }
-        }
-    }
+    private IReadOnlyList<PhoneStatus> Status() => Coordinator?.GetStatus() ?? [];
+
+    private void Post(EngineInput input) => Coordinator?.Post(input);
 
     private void List()
     {
-        var phones = engine.GetStatus();
+        var phones = Status();
         _lastListed = phones.Select(p => p.Serial).ToList();
         if (phones.Count == 0)
         {
@@ -134,6 +153,29 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
         }
     }
 
+    private void ListWindows()
+    {
+        if (Windows is null)
+        {
+            output.Warning("Só no modo real (--real).");
+            return;
+        }
+
+        var windows = Windows();
+        if (windows.Count == 0)
+        {
+            output.Plain("  Nenhum scrcpy aberto.");
+            return;
+        }
+
+        foreach (var w in windows)
+        {
+            var check = w.ActualTitle == w.ExpectedTitle ? "confere" : "DIFERENTE";
+            var port = w.Port is { } p ? $" | porta {p}" : string.Empty;
+            output.Plain($"  pid {w.ProcessId}: {Format.Id(w.Serial)} via {Format.Id(w.AdbSerial)}{port} | título \"{w.ActualTitle}\" | esperado \"{w.ExpectedTitle}\" | {check}");
+        }
+    }
+
     private void ChangeMode(string? argument)
     {
         if (argument is null || !CommandLineOptions.TryParseMode(argument, out var mode))
@@ -144,12 +186,12 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
 
         config.Global.ConnectionMode = mode;
         output.Info($"Modo global agora: {Format.Mode(mode)} (só em memória)");
-        Apply(new Reevaluate(null, "modo global mudou"));
+        Post(new Reevaluate(null, "modo global mudou"));
     }
 
     private void WithPhone(string? argument, Func<PhoneStatus, EngineInput?> build)
     {
-        var phones = engine.GetStatus();
+        var phones = Status();
         PhoneStatus? phone;
 
         if (argument is null)
@@ -186,7 +228,7 @@ internal sealed class DevSession(DecisionEngine engine, WireflexConfig config, C
 
         if (build(phone) is { } input)
         {
-            Apply(input);
+            Post(input);
         }
     }
 

@@ -23,7 +23,8 @@ public static class MonitorEventTranslator
         _ => null,
     };
 
-    private static bool IsPhone(DeviceConnection connection) => connection.Transport switch
+    /// <summary>A conexão é de um celular já identificado pelo serial (não emulador, não Wi-Fi sem serial).</summary>
+    public static bool IsPhone(DeviceConnection connection) => connection.Transport switch
     {
         AdbTransport.Emulator => false,
         AdbTransport.Usb => true,

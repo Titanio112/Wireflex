@@ -51,6 +51,21 @@ public static partial class Sensitive
     /// </summary>
     public static string Scrub(string text) => ScrubUserName(ScrubIpAddresses(text), Environment.UserName);
 
+    /// <summary>
+    /// <see cref="Scrub"/> e, além disso, mascara os valores conhecidos (ex: seriais) onde aparecerem.
+    /// Para textos de terceiros, como a saída do scrcpy, que repetem o serial do aparelho.
+    /// </summary>
+    public static string ScrubKnown(string text, params string?[] knownValues)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        foreach (var value in knownValues.Where(v => !string.IsNullOrEmpty(v)).Distinct().OrderByDescending(v => v!.Length))
+        {
+            text = text.Replace(value!, MaskAdbSerial(value), StringComparison.Ordinal);
+        }
+
+        return Scrub(text);
+    }
+
     /// <summary>Mascara qualquer IPv4 (inclusive no fim de frase) e IPv6.</summary>
     public static string ScrubIpAddresses(string text)
     {

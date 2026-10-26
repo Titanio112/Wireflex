@@ -14,14 +14,7 @@ internal static class Format
     /// <summary>Mascara serial de celular, serial do adb, IP:porta ou nome mDNS.</summary>
     public static string Id(string? serial) => Sensitive.MaskAdbSerial(serial);
 
-    public static string Transport(AdbTransport transport) => transport switch
-    {
-        AdbTransport.Usb => "USB",
-        AdbTransport.WifiTcpip => "Wi-Fi (tcpip)",
-        AdbTransport.WifiMdns => "Wi-Fi (mDNS)",
-        AdbTransport.Emulator => "emulador",
-        _ => transport.ToString(),
-    };
+    public static string Transport(AdbTransport transport) => EngineActionText.Transport(transport);
 
     public static string State(AdbDeviceState state) => state switch
     {
@@ -63,30 +56,14 @@ internal static class Format
         MonitorStatusChanged { AdbAvailable: true } =>
             "adb disponível: acompanhando os aparelhos",
         MonitorStatusChanged m =>
-            $"adb indisponível ({m.Reason}); tentando de novo com espera crescente",
+            $"adb indisponível ({m.Reason}); tentando de novo (na hora e depois com espera crescente)",
         _ => deviceEvent.GetType().Name,
     };
 
-    public static string Action(EngineAction action) => action switch
-    {
-        OpenScrcpy a =>
-            $"AbrirScrcpy {Id(a.Serial)} via {Transport(a.Transport)} (conexão {Id(a.AdbSerial)})",
-        SwitchScrcpy a =>
-            $"TrocarScrcpy {Id(a.Serial)} de {Transport(a.From)} para {Transport(a.To)} (conexão {Id(a.AdbSerial)})",
-        CloseScrcpy a =>
-            $"FecharScrcpy {Id(a.Serial)}: {a.Reason}",
-        AskUser a =>
-            $"PerguntarAoUsuario {Id(a.Serial)} via {Transport(a.Transport)}: responda com 's' (sim) ou 'n' (não)",
-        NotifyUser { Notice: DeviceNotice.Unauthorized } a =>
-            $"Avisar {Id(a.Serial)}: o celular está pedindo para autorizar a depuração USB (unauthorized)",
-        NotifyUser { Notice: DeviceNotice.Offline } a =>
-            $"Avisar {Id(a.Serial)}: o adb vê o celular, mas ele não responde (offline)",
-        NotifyUser a =>
-            $"Avisar {Id(a.Serial)}: {a.Notice}",
-        DoNothing a =>
-            $"NaoFazerNada{(a.Serial is null ? string.Empty : " " + Id(a.Serial))}: {a.Reason}",
-        _ => action.GetType().Name,
-    };
+    /// <summary>O mesmo texto que vai para o log (<see cref="EngineActionText"/>); na pergunta, diz como responder.</summary>
+    public static string Action(EngineAction action) => action is AskUser
+        ? EngineActionText.Describe(action) + ": responda com 's' (sim) ou 'n' (não)"
+        : EngineActionText.Describe(action);
 
     public static string Status(int number, PhoneStatus phone)
     {

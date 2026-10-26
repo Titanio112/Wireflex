@@ -69,6 +69,15 @@ internal sealed class FakeAdbClient(TimeProvider time) : IAdbClient
         return Task.FromResult(SerialLookup(adbSerial));
     }
 
+    public Task<string> ShellAsync(string adbSerial, string command, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<string> EnableTcpipAsync(string adbSerial, int port, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
+    public Task<AdbConnectResult> ConnectAsync(string host, int port, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
     /// <summary>
     /// Para checagens negativas ("não deve consultar"): espera no máximo <paramref name="within"/> (curto)
     /// para ver se o número de consultas passa de <paramref name="count"/>.
