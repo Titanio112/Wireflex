@@ -28,12 +28,27 @@ public partial class App : Application
     private ILogger<App>? _logger;
     private TrayIcon? _tray;
     private JobObjectProcessGuard? _guard;
+    private SingleInstance? _instance;
     private Task? _run;
     private int _exiting;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // Já tem um Wireflex rodando nesta sessão: avisa ele (que mostra uma notificação) e fecha.
+        _instance = SingleInstance.TryAcquire(AppInfo.Name);
+        if (_instance is null)
+        {
+            SingleInstance.SignalExisting(AppInfo.Name);
+            Shutdown();
+            return;
+        }
+
+        _instance.ActivationRequested += () => _tray?.ShowNotification(
+            AppInfo.Name,
+            "O Wireflex já está rodando. Use o ícone na bandeja.");
+
         _loggerFactory = LoggerFactory.Create(builder =>
         {
             builder.SetMinimumLevel(LogLevel.Debug);
@@ -128,6 +143,7 @@ public partial class App : Application
         _tray?.Dispose();
         _guard?.Dispose();
         _loggerFactory?.Dispose();
+        _instance?.Dispose();
         Shutdown();
     }
 
