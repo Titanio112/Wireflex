@@ -1,6 +1,7 @@
 using System.Text;
 using System.Threading.Channels;
 using Wireflex.Core.Adb;
+using Wireflex.Core.Logging;
 using Wireflex.Tests.Fakes;
 
 namespace Wireflex.Tests.Adb;
@@ -224,6 +225,16 @@ public sealed class AdbClientTests
     }
 
     [Fact]
+    public async Task ListDevices_SeriaisVistosPassamASerMascaradosEmQualquerTexto()
+    {
+        _server.Reply("host:devices-l", "TESTSERIAL71           device usb:1-1 product:test model:Test_Phone device:test transport_id:1\n");
+
+        await _client.ListDevicesAsync();
+
+        Assert.Equal("falhou em ***AL71 agora", Sensitive.Scrub("falhou em TESTSERIAL71 agora"));
+    }
+
+    [Fact]
     public async Task GetSerialNumber_EscolheOAparelhoERodaGetprop()
     {
         _server.Accept("host:transport:192.0.2.10:5555");
@@ -312,6 +323,32 @@ public sealed class AdbClientTests
         _server.Running = false;
 
         await Assert.ThrowsAsync<AdbException>(() => _client.ConnectAsync("192.0.2.10", 5555));
+        Assert.Equal(0, _launcher.StartServerCalls);
+    }
+
+    [Fact]
+    public async Task Disconnect_Desconecta()
+    {
+        _server.Reply("host:disconnect:192.0.2.10:5555", "disconnected 192.0.2.10:5555");
+
+        Assert.True(await _client.DisconnectAsync("192.0.2.10", 5555));
+    }
+
+    [Fact]
+    public async Task Disconnect_ConexaoQueNaoExiste_DevolveFalse()
+    {
+        // Resposta real do servidor do adb quando não tem essa conexão.
+        _server.Fail("host:disconnect:192.0.2.10:5555", "no such device '192.0.2.10:5555'");
+
+        Assert.False(await _client.DisconnectAsync("192.0.2.10", 5555));
+    }
+
+    [Fact]
+    public async Task Disconnect_ServidorParado_NaoSobeOServidor()
+    {
+        _server.Running = false;
+
+        await Assert.ThrowsAsync<AdbException>(() => _client.DisconnectAsync("192.0.2.10", 5555));
         Assert.Equal(0, _launcher.StartServerCalls);
     }
 

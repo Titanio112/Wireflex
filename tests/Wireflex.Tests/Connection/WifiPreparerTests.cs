@@ -180,6 +180,35 @@ public sealed class WifiPreparerTests
     }
 
     [Fact]
+    public async Task Catalogo_DesativarSemEntrada_CriaAEntrada()
+    {
+        var store = new CountingStore();
+        var catalog = new PhoneCatalog(new WireflexConfig(), store);
+
+        await catalog.SetPhoneConnectionModeAsync(Usb, ConnectionMode.Never);
+        await catalog.SetPhoneConnectionModeAsync(Usb, ConnectionMode.Never);
+
+        Assert.Equal(ConnectionMode.Never, catalog.ResolveConnectionMode(Usb));
+        Assert.Equal(1, store.Saves);
+    }
+
+    [Fact]
+    public async Task Catalogo_Esquecer_TiraSoAqueleCelular()
+    {
+        var config = new WireflexConfig();
+        config.Phones.Add(new KnownPhone { Serial = Usb, LastKnownIp = "192.0.2.10" });
+        config.Phones.Add(new KnownPhone { Serial = "TESTSERIAL02", LastKnownIp = "192.0.2.11" });
+        var store = new CountingStore();
+        var catalog = new PhoneCatalog(config, store);
+
+        Assert.True(await catalog.ForgetAsync(Usb));
+        Assert.False(await catalog.ForgetAsync(Usb));
+
+        Assert.Equal(["TESTSERIAL02"], catalog.Phones.Select(p => p.Serial));
+        Assert.Equal(1, store.Saves);
+    }
+
+    [Fact]
     public void Catalogo_NomeDaJanela_PrefereONomeDoAparelho()
     {
         var config = new WireflexConfig();

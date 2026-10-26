@@ -26,6 +26,12 @@ public sealed class PhoneCatalog
         _config = stored ?? throw new ArgumentNullException(nameof(stored));
         _store = store;
         _logger = logger ?? NullLogger<PhoneCatalog>.Instance;
+
+        // Celulares que não estão ligados agora também podem aparecer em textos de terceiros (ex: lista do scrcpy).
+        foreach (var phone in _config.Phones)
+        {
+            Sensitive.RememberSerial(phone.Serial);
+        }
     }
 
     /// <summary>Cópia dos celulares conhecidos.</summary>
@@ -45,6 +51,27 @@ public sealed class PhoneCatalog
         lock (_sync)
         {
             return _config.FindPhone(serial) is { } phone ? Copy(phone) : null;
+        }
+    }
+
+    /// <summary>Modo de conexão global (vale para quem não tem um próprio).</summary>
+    public ConnectionMode GlobalConnectionMode
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _config.Global.ConnectionMode;
+            }
+        }
+    }
+
+    /// <summary>Modo de conexão do celular, ou o global se ele não tiver um próprio.</summary>
+    public ConnectionMode ResolveConnectionMode(string serial)
+    {
+        lock (_sync)
+        {
+            return _config.ResolveConnectionMode(serial);
         }
     }
 
@@ -79,7 +106,6 @@ public sealed class PhoneCatalog
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(serial);
 
-        WireflexConfig? snapshot = null;
         lock (_sync)
         {
             var phone = _config.FindPhone(serial);
@@ -98,32 +124,131 @@ public sealed class PhoneCatalog
             {
                 return false;
             }
-
-            if (_store is not null)
-            {
-                snapshot = Clone(_config);
-            }
         }
 
         _logger.LogInformation("Celular aprendido: {Phone}", Sensitive.Mask(serial));
-        if (snapshot is not null)
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+        return true;
+    }
+
+    /// <summary>Remove só este celular (nome, IP, ajustes). <c>false</c> se ele não estava na config.</summary>
+    public async Task<bool> ForgetAsync(string serial, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(serial);
+        lock (_sync)
         {
-            await _saveLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-            try
+            if (_config.Phones.RemoveAll(p => p.Serial == serial) == 0)
             {
-                await _store!.SaveAsync(snapshot, cancellationToken).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                _logger.LogWarning(ex, "Não foi possível gravar a configuração");
-            }
-            finally
-            {
-                _saveLock.Release();
+                return false;
             }
         }
 
+        _logger.LogInformation("Celular esquecido: {Phone}", Sensitive.Mask(serial));
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
         return true;
+    }
+
+    /// <summary>
+    /// Modo de conexão próprio do celular (<c>null</c> = segue o global). Cria a entrada se o celular ainda não
+    /// estiver na config (ex: só apareceu pelo Wi-Fi).
+    /// </summary>
+    public async Task SetPhoneConnectionModeAsync(string serial, ConnectionMode? mode, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(serial);
+        lock (_sync)
+        {
+            var phone = _config.FindPhone(serial);
+            if (phone is null)
+            {
+                phone = new KnownPhone { Serial = serial };
+                _config.Phones.Add(phone);
+            }
+            else if (phone.Settings.ConnectionMode == mode)
+            {
+                return;
+            }
+
+            phone.Settings.ConnectionMode = mode;
+        }
+
+        _logger.LogInformation("Modo de conexão de {Phone}: {Mode}", Sensitive.Mask(serial), mode?.ToString() ?? "o global");
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Opção "iniciar com o Windows" gravada na config.</summary>
+    public bool StartWithWindows
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _config.Global.StartWithWindows;
+            }
+        }
+    }
+
+    public async Task SetStartWithWindowsAsync(bool enabled, CancellationToken cancellationToken = default)
+    {
+        lock (_sync)
+        {
+            if (_config.Global.StartWithWindows == enabled)
+            {
+                return;
+            }
+
+            _config.Global.StartWithWindows = enabled;
+        }
+
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Muda o modo de conexão global e grava.</summary>
+    public async Task SetGlobalConnectionModeAsync(ConnectionMode mode, CancellationToken cancellationToken = default)
+    {
+        lock (_sync)
+        {
+            if (_config.Global.ConnectionMode == mode)
+            {
+                return;
+            }
+
+            _config.Global.ConnectionMode = mode;
+        }
+
+        _logger.LogInformation("Modo de conexão global: {Mode}", mode);
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Grava o estado atual. A cópia é tirada já com a trava de gravação: com vários gravando ao mesmo tempo
+    /// (bandeja e coordenador), a última gravação sempre leva o estado mais novo.
+    /// </summary>
+    private async Task SaveAsync(CancellationToken cancellationToken)
+    {
+        if (_store is null)
+        {
+            return;
+        }
+
+        await _saveLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            WireflexConfig snapshot;
+            lock (_sync)
+            {
+                snapshot = Clone(_config);
+            }
+
+            await _store.SaveAsync(snapshot, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning(ex, "Não foi possível gravar a configuração");
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
     }
 
     private static bool Update(string? current, string? value, Action<string> set)

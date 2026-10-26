@@ -5,6 +5,7 @@ using Wireflex.Core.Connection;
 using Wireflex.Core.Decisions;
 using Wireflex.Core.Execution;
 using Wireflex.Core.Monitoring;
+using Wireflex.Core.Tray;
 using Wireflex.Tests.Fakes;
 
 namespace Wireflex.Tests.Connection;
@@ -629,6 +630,174 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Esquecer_NoCabo_FechaDesconectaEIgnoraAteSairDoAlcance()
+    {
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        var stored = new WireflexConfig();
+        stored.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        Start(real: true, stored);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        await SendAsync(new DeviceAppeared(Wifi()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await Commands().ForgetAsync(Phone);
+        await IdleAsync();
+
+        // Fecha, sai da config e desconecta o Wi-Fi (uma vez: o IP gravado e a conexão atual são o mesmo).
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+        Assert.Null(_store.Last!.FindPhone(Phone));
+        Assert.Equal(1, _adb.Count($"disconnect {WifiSerial}"));
+        Assert.Equal(PhonePhase.Ignored, Assert.Single(_coordinator.GetStatus()).Phase);
+
+        // Ainda no cabo: o Wi-Fi some e outros eventos chegam, e nada abre nem volta para a config.
+        await SendAsync(new DeviceDisappeared(Wifi()));
+        await SendAsync(new DeviceStateChanged(Usb(), AdbDeviceState.Device));
+        _coordinator.Post(new Reevaluate(null, "teste"));
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+        Assert.Null(_store.Last!.FindPhone(Phone));
+
+        // Tirou o cabo (fora do alcance) e plugou de novo: é um celular novo, que abre e é aprendido.
+        await SendAsync(new DeviceDisappeared(Usb()));
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+        Assert.NotNull(_store.Last!.FindPhone(Phone));
+    }
+
+    [Fact]
+    public async Task Esquecer_SoPeloWifi_DesconectaENaoReconecta()
+    {
+        Start(real: true);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+        Assert.Equal(Ip, _catalog.Find(Phone)!.LastKnownIp);
+
+        await Commands().ForgetAsync(Phone);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+        Assert.Equal(1, _adb.Count($"disconnect {WifiSerial}"));
+
+        // O disconnect derruba o Wi-Fi: fora do alcance, e a reconexão não tem mais o IP.
+        await SendAsync(new DeviceDisappeared(Wifi()));
+        await TickAsync();
+        Assert.Equal(0, _adb.Count("connect"));
+        Assert.Null(_catalog.Find(Phone));
+    }
+
+    [Fact]
+    public async Task Esquecer_ForaDoAlcance_SoTiraDaConfig()
+    {
+        var stored = new WireflexConfig();
+        stored.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        Start(real: true, stored);
+        await AdbAvailableAsync();
+
+        await Commands().ForgetAsync(Phone);
+        await IdleAsync();
+
+        Assert.Null(_store.Last!.FindPhone(Phone));
+        Assert.Empty(_coordinator.GetStatus());
+
+        // Volta pelo cabo: abre normalmente.
+        await SendAsync(new DeviceAppeared(Usb()));
+        await _time.AdvanceWhenTimerCreatedAsync(StableWindow);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task Desativar_SoPeloWifi_GravaEFecha()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        await Commands().SetEnabledAsync(Phone, enabled: false);
+        await IdleAsync();
+
+        Assert.Equal(ConnectionMode.Never, _catalog.Find(Phone)!.Settings.ConnectionMode);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        await Commands().SetEnabledAsync(Phone, enabled: true);
+        await IdleAsync();
+        Assert.Null(_catalog.Find(Phone)!.Settings.ConnectionMode);
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task PausarERetomar_SoPeloWifi()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        Commands().SetPaused(Phone, true);
+        await IdleAsync();
+        Assert.Equal(PhonePhase.Paused, Assert.Single(_coordinator.GetStatus()).Phase);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        Commands().SetPaused(Phone, false);
+        await IdleAsync();
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ModoGlobal_GravaEReavaliaTodosNaHora()
+    {
+        Start(real: true, new WireflexConfig());
+        await AdbAvailableAsync();
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Never);
+        await IdleAsync();
+        Assert.Equal(ConnectionMode.Never, _store.Last!.Global.ConnectionMode);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Ask);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<AskUser>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Automatic);
+        await IdleAsync();
+        Assert.Equal(ConnectionMode.Automatic, _store.Last!.Global.ConnectionMode);
+    }
+
+    [Fact]
+    public async Task ModoPerguntar_RespostaPeloDialogoOuMenu()
+    {
+        Start(real: false, new WireflexConfig { Global = new GlobalSettings { ConnectionMode = ConnectionMode.Ask } });
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<AskUser>());
+
+        Commands().Answer(Phone, accepted: false);
+        await IdleAsync();
+        Assert.Equal(PhonePhase.ClosedByUser, Assert.Single(_coordinator.GetStatus()).Phase);
+
+        // Disse não, mas mudou de ideia: "Abrir agora".
+        Commands().OpenNow(Phone);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task AbrirAgora_DepoisDeFecharAJanela()
+    {
+        await MirroringByCableAsync();
+        _coordinator.Post(new ScrcpyClosedByUser(Phone, Phone));
+        await IdleAsync();
+
+        Commands().OpenNow(Phone);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+        Assert.Equal(PhonePhase.Mirroring, Assert.Single(_coordinator.GetStatus()).Phase);
+    }
+
+    [Fact]
     public async Task CadaAcao_VaiParaOLogComOTextoDaTela()
     {
         var logs = new RecordingLoggerFactory();
@@ -651,7 +820,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     {
         _catalog = new PhoneCatalog(stored ?? new WireflexConfig(), real ? _store : null);
         _coordinator = new ConnectionCoordinator(
-            new DecisionEngine(_ => ConnectionMode.Automatic),
+            new DecisionEngine(serial => _catalog.ResolveConnectionMode(serial)),
             _executor,
             _adb,
             _catalog,
@@ -659,6 +828,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
             {
                 PrepareWifi = real,
                 ReconnectWifi = real,
+                DisconnectWifiOnForget = real,
                 HoldLimit = HoldLimit,
                 UsbStableWindow = StableWindow,
                 Preparer = new WifiPreparerOptions { TcpipSettleDelay = SettleDelay },
@@ -671,6 +841,8 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     private Task AdbAvailableAsync() => SendAsync(new MonitorStatusChanged(true, null));
+
+    private TrayCommands Commands() => new(_coordinator, _catalog);
 
     private async Task MirroringByCableAsync()
     {

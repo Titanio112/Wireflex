@@ -49,7 +49,7 @@ public sealed class AdbClient : IAdbClient
         WithTimeoutAsync(CommandTimeout, "host:devices-l", async token =>
         {
             await using var stream = await OpenAsync("host:devices-l", token).ConfigureAwait(false);
-            return AdbDeviceListParser.Parse(await AdbWire.ReadLengthPrefixedAsync(stream, token).ConfigureAwait(false));
+            return Remember(AdbDeviceListParser.Parse(await AdbWire.ReadLengthPrefixedAsync(stream, token).ConfigureAwait(false)));
         }, cancellationToken);
 
     public async IAsyncEnumerable<IReadOnlyList<AdbDevice>> TrackDevicesAsync(
@@ -72,11 +72,22 @@ public sealed class AdbClient : IAdbClient
 
             foreach (var payload in decoder.Append(buffer.AsSpan(0, read)))
             {
-                yield return AdbDeviceListParser.Parse(payload);
+                yield return Remember(AdbDeviceListParser.Parse(payload));
             }
         }
 
         _logger.LogWarning("O servidor do adb encerrou o acompanhamento (caiu ou reiniciou)");
+    }
+
+    /// <summary>Todo serial que o adb mostra passa a ser mascarado em qualquer texto (ex: a lista que o scrcpy escreve).</summary>
+    private static IReadOnlyList<AdbDevice> Remember(IReadOnlyList<AdbDevice> devices)
+    {
+        foreach (var device in devices)
+        {
+            Sensitive.RememberSerial(device.Serial);
+        }
+
+        return devices;
     }
 
     /// <summary>Conexão derrubada pelo servidor (ex: <c>adb kill-server</c>) é fim do fluxo, não erro.</summary>
@@ -102,6 +113,7 @@ public sealed class AdbClient : IAdbClient
             var serial = (await ShellAsync(adbSerial, "getprop ro.serialno", cancellationToken).ConfigureAwait(false)).Trim();
             if (serial.Length > 0)
             {
+                Sensitive.RememberSerial(serial);
                 return serial;
             }
 
@@ -165,6 +177,29 @@ public sealed class AdbClient : IAdbClient
             var connected = message.StartsWith("connected to", StringComparison.Ordinal)
                 || message.StartsWith("already connected to", StringComparison.Ordinal);
             return new AdbConnectResult(connected, message);
+        }, cancellationToken);
+    }
+
+    public Task<bool> DisconnectAsync(string host, int port, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
+        ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(port, 65535);
+
+        return WithTimeoutAsync(CommandTimeout, "host:disconnect", async token =>
+        {
+            var service = $"host:disconnect:{host}:{port.ToString(CultureInfo.InvariantCulture)}";
+            try
+            {
+                await using var stream = await OpenAsync(service, token).ConfigureAwait(false);
+                await AdbWire.ReadLengthPrefixedAsync(stream, token).ConfigureAwait(false);
+                return true;
+            }
+            catch (AdbException ex) when (ex.Message.Contains("no such device", StringComparison.OrdinalIgnoreCase))
+            {
+                // O servidor responde FAIL "no such device" quando não tinha essa conexão.
+                return false;
+            }
         }, cancellationToken);
     }
 
