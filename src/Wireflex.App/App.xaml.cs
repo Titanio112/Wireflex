@@ -113,7 +113,9 @@ public partial class App : Application
             Guard = _guard,
             LoggerFactory = loggerFactory,
         });
-        _tray.MenuSource = () => TrayMenuModel.Build(runtime.Coordinator.GetStatus(), catalog.Phones, catalog.DisplayName);
+        _tray.Commands = new TrayCommands(runtime.Coordinator, catalog);
+        _tray.OnError = ex => _logger?.LogError(ex, "Falha num comando do menu");
+        _tray.MenuSource = () => TrayMenuModel.Build(runtime.Coordinator.GetStatus(), catalog.Phones, catalog.DisplayName, catalog.GlobalConnectionMode);
         _tray.RequestRefresh();
         _run = Task.Run(() => RunAsync(runtime));
     }

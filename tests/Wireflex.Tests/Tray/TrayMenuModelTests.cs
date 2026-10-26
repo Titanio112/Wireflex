@@ -74,6 +74,58 @@ public sealed class TrayMenuModelTests
         Assert.Equal(["Celular Alfa", "Celular Beta", "Celular Gama"], menu.Phones.Select(p => p.Name));
     }
 
+    [Theory]
+    [InlineData(PhonePhase.ClosedByUser, true)]
+    [InlineData(PhonePhase.Idle, true)]
+    [InlineData(PhonePhase.WaitingForAnswer, true)]
+    [InlineData(PhonePhase.Mirroring, false)]
+    [InlineData(PhonePhase.Paused, false)]
+    [InlineData(PhonePhase.OutOfRange, false)]
+    [InlineData(PhonePhase.Ignored, false)]
+    public void AbrirAgora_SoComOCelularAoAlcanceESemNadaAberto(PhonePhase phase, bool expected)
+    {
+        var menu = TrayMenuModel.Build([Status(PhoneA, phase)], [], Name);
+
+        Assert.Equal(expected, Assert.Single(menu.Phones).CanOpenNow);
+    }
+
+    [Fact]
+    public void Desativado_ApareceComoDesativadoESemAbrirAgora()
+    {
+        var known = new KnownPhone { Serial = PhoneA, Settings = new PhoneSettings { ConnectionMode = ConnectionMode.Never } };
+
+        var phone = Assert.Single(TrayMenuModel.Build([Status(PhoneA, PhonePhase.Idle)], [known], Name).Phones);
+
+        Assert.Equal((TrayPhoneState.Disabled, true, false), (phone.State, phone.Disabled, phone.CanOpenNow));
+    }
+
+    [Fact]
+    public void ModoGlobalNunca_SemAbrirAgora()
+    {
+        var phone = Assert.Single(TrayMenuModel.Build([Status(PhoneA, PhonePhase.Idle)], [], Name, ConnectionMode.Never).Phones);
+
+        Assert.False(phone.CanOpenNow);
+    }
+
+    [Fact]
+    public void Esquecido_NaoPausaNemMudaAjustes()
+    {
+        var phone = Assert.Single(TrayMenuModel.Build([Status(PhoneA, PhonePhase.Ignored)], [], Name).Phones);
+
+        Assert.Equal(TrayPhoneState.Forgotten, phone.State);
+        Assert.False(phone.CanPause);
+        Assert.False(phone.CanChangeSettings);
+    }
+
+    [Fact]
+    public void ForaDoAlcance_NaoPausa()
+    {
+        var phone = Assert.Single(TrayMenuModel.Build([], [new KnownPhone { Serial = PhoneA }], Name).Phones);
+
+        Assert.False(phone.CanPause);
+        Assert.True(phone.CanChangeSettings);
+    }
+
     [Fact]
     public void Tooltip_ResumoCurto()
     {
@@ -105,6 +157,18 @@ public sealed class TrayMenuModelTests
     }
 
     private static string Name(string serial) => Names[serial];
+
+    private static PhoneStatus Status(string serial, PhonePhase phase)
+    {
+        var state = phase == PhonePhase.OutOfRange ? AdbDeviceState.Offline : AdbDeviceState.Device;
+        return new PhoneStatus(
+            serial,
+            phase,
+            phase == PhonePhase.Mirroring ? serial : null,
+            phase == PhonePhase.Mirroring ? AdbTransport.Usb : null,
+            [new PhoneConnectionStatus(serial, AdbTransport.Usb, state)],
+            phase == PhonePhase.Paused);
+    }
 
     private static PhoneStatus Mirroring(string serial, AdbTransport transport)
     {

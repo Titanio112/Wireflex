@@ -168,6 +168,29 @@ public sealed class AdbClient : IAdbClient
         }, cancellationToken);
     }
 
+    public Task<bool> DisconnectAsync(string host, int port, CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(host);
+        ArgumentOutOfRangeException.ThrowIfLessThan(port, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(port, 65535);
+
+        return WithTimeoutAsync(CommandTimeout, "host:disconnect", async token =>
+        {
+            var service = $"host:disconnect:{host}:{port.ToString(CultureInfo.InvariantCulture)}";
+            try
+            {
+                await using var stream = await OpenAsync(service, token).ConfigureAwait(false);
+                await AdbWire.ReadLengthPrefixedAsync(stream, token).ConfigureAwait(false);
+                return true;
+            }
+            catch (AdbException ex) when (ex.Message.Contains("no such device", StringComparison.OrdinalIgnoreCase))
+            {
+                // O servidor responde FAIL "no such device" quando não tinha essa conexão.
+                return false;
+            }
+        }, cancellationToken);
+    }
+
     /// <summary>
     /// Garante o servidor do adb no ar. Se não estiver, roda <c>adb start-server</c>. Na primeira vez também
     /// compara a versão do servidor com a do adb.exe: se forem diferentes, o <c>start-server</c> faz o próprio

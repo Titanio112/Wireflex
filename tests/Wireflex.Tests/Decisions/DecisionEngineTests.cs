@@ -390,6 +390,85 @@ public class DecisionEngineTests
     }
 
     [Fact]
+    public void OpenRequested_AfterUserClosed_Opens()
+    {
+        PlugCable(Phone1);
+        Handle(new ScrcpyClosedByUser(Phone1, Phone1));
+
+        var open = Only<OpenScrcpy>(Handle(new OpenRequested(Phone1)));
+
+        Assert.Equal(AdbTransport.Usb, open.Transport);
+        Assert.Equal(PhonePhase.Mirroring, Status(Phone1).Phase);
+    }
+
+    [Fact]
+    public void OpenRequested_InAskMode_OpensWithoutAsking()
+    {
+        _config.Global.ConnectionMode = ConnectionMode.Ask;
+        Only<AskUser>(PlugCable(Phone1));
+
+        Only<OpenScrcpy>(Handle(new OpenRequested(Phone1)));
+        Assert.Equal(PhonePhase.Mirroring, Status(Phone1).Phase);
+    }
+
+    [Fact]
+    public void OpenRequested_RefusedWhenPausedDisabledOrOutOfRange()
+    {
+        Only<DoNothing>(Handle(new OpenRequested(Phone1)));
+
+        PlugCable(Phone1);
+        Handle(new PhonePauseChanged(Phone1, true));
+        Only<DoNothing>(Handle(new OpenRequested(Phone1)));
+
+        SetPhoneMode(Phone2, ConnectionMode.Never);
+        PlugCable(Phone2);
+        Only<DoNothing>(Handle(new OpenRequested(Phone2)));
+    }
+
+    [Fact]
+    public void DisablingWhileMirroring_ClosesScrcpy_AndEnablingReopens()
+    {
+        PlugCable(Phone1);
+        SetPhoneMode(Phone1, ConnectionMode.Never);
+
+        Only<CloseScrcpy>(Handle(new Reevaluate(Phone1, "celular desativado")));
+
+        _config.Phones.Clear();
+        Only<OpenScrcpy>(Handle(new Reevaluate(Phone1, "celular ativado")));
+    }
+
+    [Fact]
+    public void ForgottenWhileConnected_ClosesAndStaysIgnoredUntilOutOfRange()
+    {
+        PlugCable(Phone1);
+        WifiOn(Phone1, Wifi1);
+
+        Only<CloseScrcpy>(Handle(new PhoneForgotten(Phone1)));
+        Assert.Equal(PhonePhase.Ignored, Status(Phone1).Phase);
+
+        // Ainda ao alcance: nada abre sozinho, nem avisa.
+        Only<DoNothing>(UnplugCable(Phone1));
+        Only<DoNothing>(Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Unauthorized)));
+        Only<DoNothing>(Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Device)));
+        Only<DoNothing>(Handle(new Reevaluate(null, "teste")));
+        Only<DoNothing>(Handle(new OpenRequested(Phone1)));
+
+        // Sai do alcance e volta: é um celular como outro qualquer.
+        WifiOff(Phone1, Wifi1);
+        Only<OpenScrcpy>(PlugCable(Phone1));
+    }
+
+    [Fact]
+    public void ForgottenBeforeConnectionsArrive_StaysIgnored()
+    {
+        // O coordenador segurava os eventos: o motor recebe o "esquecido" antes das conexões.
+        Only<DoNothing>(Handle(new PhoneForgotten(Phone1)));
+
+        Only<DoNothing>(PlugCable(Phone1));
+        Assert.Equal(PhonePhase.Ignored, Status(Phone1).Phase);
+    }
+
+    [Fact]
     public void UnknownInputs_DoNothing()
     {
         Only<DoNothing>(UnplugCable(Phone1));

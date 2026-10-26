@@ -82,7 +82,12 @@ public sealed class WireflexRuntime
             Scrcpy ?? (IActionExecutor)new SimulatedActionExecutor(),
             Adb,
             catalog,
-            new ConnectionCoordinatorOptions { PrepareWifi = settings.Real, ReconnectWifi = settings.Real },
+            new ConnectionCoordinatorOptions
+            {
+                PrepareWifi = settings.Real,
+                ReconnectWifi = settings.Real,
+                DisconnectWifiOnForget = settings.Real,
+            },
             settings.Observer,
             loggerFactory);
         _monitor = new DeviceMonitor(Adb, new DeviceMonitorOptions(), loggerFactory.CreateLogger<DeviceMonitor>());

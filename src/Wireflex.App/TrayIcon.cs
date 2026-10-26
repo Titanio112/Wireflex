@@ -36,6 +36,12 @@ internal sealed class TrayIcon : IDisposable
     /// <summary>De onde vem o conteúdo do menu. <c>null</c> enquanto o Wireflex não está acompanhando os celulares.</summary>
     public Func<TrayMenu>? MenuSource { get; set; }
 
+    /// <summary>O que os itens de cada celular fazem (junto com <see cref="MenuSource"/>).</summary>
+    public TrayCommands? Commands { get; set; }
+
+    /// <summary>Falha de um comando do menu (para o log).</summary>
+    public Action<Exception>? OnError { get; set; }
+
     /// <summary>Texto mostrado no lugar da lista quando <see cref="MenuSource"/> é <c>null</c>.</summary>
     public string StatusMessage { get; set; } = "Iniciando...";
 
@@ -93,12 +99,79 @@ internal sealed class TrayIcon : IDisposable
         {
             foreach (var phone in menu.Phones)
             {
-                _menu.Items.Add(new Forms.ToolStripMenuItem(Escape($"{phone.Name}: {phone.StatusText}")));
+                _menu.Items.Add(PhoneItem(phone));
             }
         }
 
         _menu.Items.Add(new Forms.ToolStripSeparator());
         _menu.Items.Add("Sair", null, (_, _) => _exit());
+    }
+
+    private Forms.ToolStripMenuItem PhoneItem(TrayPhone phone)
+    {
+        var serial = phone.Serial;
+        var item = new Forms.ToolStripMenuItem(Escape($"{phone.Name}: {phone.StatusText}"));
+        item.DropDownItems.Add(new Forms.ToolStripMenuItem("Abrir agora", null, (_, _) => Run(c => c.OpenNow(serial)))
+        {
+            Enabled = phone.CanOpenNow,
+        });
+        item.DropDownItems.Add(new Forms.ToolStripMenuItem(phone.Paused ? "Retomar" : "Pausar", null, (_, _) => Run(c => c.SetPaused(serial, !phone.Paused)))
+        {
+            Enabled = phone.CanPause,
+            ToolTipText = "Só até fechar o Wireflex",
+        });
+        item.DropDownItems.Add(new Forms.ToolStripMenuItem("Desativado", null, (_, _) => RunAsync(c => c.SetEnabledAsync(serial, phone.Disabled)))
+        {
+            Checked = phone.Disabled,
+            Enabled = phone.CanChangeSettings,
+            ToolTipText = "Não abre o espelhamento deste celular (fica gravado)",
+        });
+        item.DropDownItems.Add(new Forms.ToolStripSeparator());
+        item.DropDownItems.Add(new Forms.ToolStripMenuItem("Esquecer...", null, (_, _) => Forget(phone))
+        {
+            Enabled = phone.CanChangeSettings,
+        });
+        return item;
+    }
+
+    private void Forget(TrayPhone phone)
+    {
+        var answer = System.Windows.MessageBox.Show(
+            $"Esquecer {phone.Name}?\n\nEle sai da lista e o Wi-Fi dele é desconectado. Se estiver ligado agora, "
+                + "fica ignorado até sair do alcance (sem cabo e sem Wi-Fi) e voltar.",
+            AppInfo.Name,
+            System.Windows.MessageBoxButton.YesNo,
+            System.Windows.MessageBoxImage.Question,
+            System.Windows.MessageBoxResult.No);
+        if (answer == System.Windows.MessageBoxResult.Yes)
+        {
+            RunAsync(c => c.ForgetAsync(phone.Serial));
+        }
+    }
+
+    private void Run(Action<TrayCommands> command) => RunAsync(c =>
+    {
+        command(c);
+        return Task.CompletedTask;
+    });
+
+    private async void RunAsync(Func<TrayCommands, Task> command)
+    {
+        if (Commands is not { } commands)
+        {
+            return;
+        }
+
+        try
+        {
+            await command(commands);
+        }
+        catch (Exception ex)
+        {
+            OnError?.Invoke(ex);
+        }
+
+        RequestRefresh();
     }
 
     /// <summary>No menu do WinForms, &amp; marca a tecla de atalho: o nome do celular pode ter.</summary>

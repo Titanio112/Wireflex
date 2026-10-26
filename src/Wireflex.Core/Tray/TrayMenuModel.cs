@@ -21,10 +21,30 @@ public enum TrayPhoneState
 
     /// <summary>Ao alcance, nada aberto (ex: modo nunca).</summary>
     Available,
+
+    /// <summary>Modo nunca só para este celular.</summary>
+    Disabled,
+
+    /// <summary>Esquecido com o celular ainda ligado: ignorado até sair do alcance e voltar.</summary>
+    Forgotten,
 }
 
 /// <param name="Name">Nome para o menu (o nome do aparelho pode ter o nome do dono: fica só na tela e no log local).</param>
-public sealed record TrayPhone(string Serial, string Name, TrayPhoneState State, string StatusText);
+/// <param name="Paused">Pausado nesta sessão (até fechar o Wireflex).</param>
+/// <param name="Disabled">Modo nunca só para este celular, gravado na config.</param>
+/// <param name="CanOpenNow">"Abrir agora" disponível: ao alcance, sem scrcpy aberto, nem pausado, desativado ou esquecido.</param>
+/// <param name="CanPause">Pausar/retomar disponível (o celular foi visto nesta sessão e não foi esquecido).</param>
+/// <param name="CanChangeSettings">Desativar e esquecer disponíveis (não para quem acabou de ser esquecido).</param>
+public sealed record TrayPhone(
+    string Serial,
+    string Name,
+    TrayPhoneState State,
+    string StatusText,
+    bool Paused = false,
+    bool Disabled = false,
+    bool CanOpenNow = false,
+    bool CanPause = false,
+    bool CanChangeSettings = true);
 
 /// <param name="Tooltip">Resumo curto para o tooltip do ícone (no máximo <see cref="TrayMenuModel.TooltipMaxLength"/> caracteres).</param>
 public sealed record TrayMenu(IReadOnlyList<TrayPhone> Phones, string Tooltip);
@@ -46,34 +66,66 @@ public static class TrayMenuModel
         ([TrayPhoneState.Available], "disponível", "disponíveis"),
         ([TrayPhoneState.ClosedByUser], "fechado", "fechados"),
         ([TrayPhoneState.Paused], "pausado", "pausados"),
+        ([TrayPhoneState.Disabled], "desativado", "desativados"),
+        ([TrayPhoneState.Forgotten], "esquecido", "esquecidos"),
         ([TrayPhoneState.Connecting], "conectando", "conectando"),
         ([TrayPhoneState.Unauthorized], "sem autorização", "sem autorização"),
         ([TrayPhoneState.Offline], "offline", "offline"),
         ([TrayPhoneState.OutOfRange], "fora do alcance", "fora do alcance"),
     ];
 
+    /// <param name="globalMode">Modo de conexão global (vale para quem não tem um próprio).</param>
     public static TrayMenu Build(
         IReadOnlyList<PhoneStatus> engine,
         IReadOnlyList<KnownPhone> known,
-        Func<string, string> displayName)
+        Func<string, string> displayName,
+        ConnectionMode globalMode = ConnectionMode.Automatic)
     {
         ArgumentNullException.ThrowIfNull(engine);
         ArgumentNullException.ThrowIfNull(known);
         ArgumentNullException.ThrowIfNull(displayName);
 
         var bySerial = engine.ToDictionary(p => p.Serial, StringComparer.Ordinal);
+        var settings = known.ToDictionary(p => p.Serial, p => p.Settings, StringComparer.Ordinal);
         var serials = known.Select(p => p.Serial).Concat(engine.Select(p => p.Serial)).Distinct(StringComparer.Ordinal);
         var phones = serials
-            .Select(serial =>
-            {
-                var state = bySerial.TryGetValue(serial, out var status) ? StateOf(status) : TrayPhoneState.OutOfRange;
-                return new TrayPhone(serial, displayName(serial), state, StatusText(state));
-            })
+            .Select(serial => Phone(
+                serial,
+                displayName(serial),
+                bySerial.GetValueOrDefault(serial),
+                settings.GetValueOrDefault(serial)?.ConnectionMode,
+                globalMode))
             .OrderBy(p => p.Name, StringComparer.CurrentCultureIgnoreCase)
             .ThenBy(p => p.Serial, StringComparer.Ordinal)
             .ToList();
 
         return new TrayMenu(phones, Tooltip(phones));
+    }
+
+    private static TrayPhone Phone(string serial, string name, PhoneStatus? status, ConnectionMode? phoneMode, ConnectionMode globalMode)
+    {
+        var state = status is null ? TrayPhoneState.OutOfRange : StateOf(status);
+        var forgotten = state == TrayPhoneState.Forgotten;
+        var disabled = phoneMode == ConnectionMode.Never;
+        if (disabled && !forgotten)
+        {
+            state = TrayPhoneState.Disabled;
+        }
+
+        var paused = status?.Paused ?? false;
+        var canOpenNow = !paused
+            && (phoneMode ?? globalMode) != ConnectionMode.Never
+            && status is { Phase: PhonePhase.ClosedByUser or PhonePhase.Idle or PhonePhase.WaitingForAnswer };
+        return new TrayPhone(
+            serial,
+            name,
+            state,
+            StatusText(state),
+            paused,
+            disabled,
+            canOpenNow,
+            CanPause: status is not null && !forgotten,
+            CanChangeSettings: !forgotten);
     }
 
     public static TrayPhoneState StateOf(PhoneStatus status)
@@ -91,6 +143,7 @@ public static class TrayMenuModel
             PhonePhase.Paused => TrayPhoneState.Paused,
             PhonePhase.WaitingForAnswer => TrayPhoneState.WaitingForAnswer,
             PhonePhase.ClosedByUser => TrayPhoneState.ClosedByUser,
+            PhonePhase.Ignored => TrayPhoneState.Forgotten,
             _ => TrayPhoneState.Available,
         };
     }
@@ -106,6 +159,8 @@ public static class TrayMenuModel
         TrayPhoneState.WaitingForAnswer => "aguardando resposta: abrir o espelhamento?",
         TrayPhoneState.Unauthorized => "autorize a depuração USB no celular",
         TrayPhoneState.Connecting => "conectando",
+        TrayPhoneState.Disabled => "desativado",
+        TrayPhoneState.Forgotten => "esquecido (ignorado até sair do alcance e voltar)",
         _ => "disponível",
     };
 
