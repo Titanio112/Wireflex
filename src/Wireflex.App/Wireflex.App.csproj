@@ -4,10 +4,23 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
+    <!-- Só para o NotifyIcon (ícone da bandeja), que vem com o .NET: nenhum pacote a mais. -->
+    <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- WinForms e WPF têm nomes iguais (Application, MessageBox): os tipos do WinForms são usados com o nome completo. -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.13" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Wireflex.Core\Wireflex.Core.csproj" />
+    <ProjectReference Include="..\Wireflex.Windows\Wireflex.Windows.csproj" />
   </ItemGroup>
 
 </Project>

@@ -48,6 +48,15 @@ public sealed class PhoneCatalog
         }
     }
 
+    /// <summary>Modo de conexão do celular, ou o global se ele não tiver um próprio.</summary>
+    public ConnectionMode ResolveConnectionMode(string serial)
+    {
+        lock (_sync)
+        {
+            return _config.ResolveConnectionMode(serial);
+        }
+    }
+
     public WifiMode ResolveWifiMode(string serial)
     {
         lock (_sync)
