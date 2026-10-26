@@ -1,6 +1,7 @@
 using System.Text;
 using System.Threading.Channels;
 using Wireflex.Core.Adb;
+using Wireflex.Core.Logging;
 using Wireflex.Tests.Fakes;
 
 namespace Wireflex.Tests.Adb;
@@ -221,6 +222,16 @@ public sealed class AdbClientTests
         var devices = await _client.ListDevicesAsync();
 
         Assert.Equal(Serial, Assert.Single(devices).Serial);
+    }
+
+    [Fact]
+    public async Task ListDevices_SeriaisVistosPassamASerMascaradosEmQualquerTexto()
+    {
+        _server.Reply("host:devices-l", "TESTSERIAL71           device usb:1-1 product:test model:Test_Phone device:test transport_id:1\n");
+
+        await _client.ListDevicesAsync();
+
+        Assert.Equal("falhou em ***AL71 agora", Sensitive.Scrub("falhou em TESTSERIAL71 agora"));
     }
 
     [Fact]

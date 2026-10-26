@@ -26,6 +26,12 @@ public sealed class PhoneCatalog
         _config = stored ?? throw new ArgumentNullException(nameof(stored));
         _store = store;
         _logger = logger ?? NullLogger<PhoneCatalog>.Instance;
+
+        // Celulares que não estão ligados agora também podem aparecer em textos de terceiros (ex: lista do scrcpy).
+        foreach (var phone in _config.Phones)
+        {
+            Sensitive.RememberSerial(phone.Serial);
+        }
     }
 
     /// <summary>Cópia dos celulares conhecidos.</summary>
