@@ -169,6 +169,33 @@ public sealed class PhoneCatalog
         await SaveAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>Opção "iniciar com o Windows" gravada na config.</summary>
+    public bool StartWithWindows
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _config.Global.StartWithWindows;
+            }
+        }
+    }
+
+    public async Task SetStartWithWindowsAsync(bool enabled, CancellationToken cancellationToken = default)
+    {
+        lock (_sync)
+        {
+            if (_config.Global.StartWithWindows == enabled)
+            {
+                return;
+            }
+
+            _config.Global.StartWithWindows = enabled;
+        }
+
+        await SaveAsync(cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Muda o modo de conexão global e grava.</summary>
     public async Task SetGlobalConnectionModeAsync(ConnectionMode mode, CancellationToken cancellationToken = default)
     {

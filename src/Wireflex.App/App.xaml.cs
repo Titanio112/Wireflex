@@ -121,10 +121,35 @@ public partial class App : Application
             catalog.DisplayName,
             serial => runtime.Coordinator.GetStatus().Any(p => p.Serial == serial && p.Phase == PhonePhase.WaitingForAnswer));
         _tray.Refreshed += _questions.Refresh;
+        if (!simulated)
+        {
+            _tray.Startup = StartupOption(catalog);
+        }
         _tray.OnError = ex => _logger?.LogError(ex, "Falha num comando do menu");
         _tray.MenuSource = () => TrayMenuModel.Build(runtime.Coordinator.GetStatus(), catalog.Phones, catalog.DisplayName, catalog.GlobalConnectionMode);
         _tray.RequestRefresh();
         _run = Task.Run(() => RunAsync(runtime));
+    }
+
+    /// <summary>"Iniciar com o Windows": acerta a chave Run com o caminho deste executável, como a config manda.</summary>
+    private StartWithWindows? StartupOption(PhoneCatalog catalog)
+    {
+        if (Environment.ProcessPath is not { } exe)
+        {
+            return null;
+        }
+
+        var startup = new StartWithWindows(new RunKeyStartupRegistration(), catalog, exe, _logger);
+        try
+        {
+            startup.Sync();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogWarning(ex, "Não foi possível acertar a opção Iniciar com o Windows");
+        }
+
+        return startup;
     }
 
     private async Task RunAsync(WireflexRuntime runtime)

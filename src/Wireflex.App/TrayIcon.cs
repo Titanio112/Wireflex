@@ -1,6 +1,7 @@
 using System.Windows.Threading;
 using Wireflex.Core;
 using Wireflex.Core.Configuration;
+using Wireflex.Core.Hosting;
 using Wireflex.Core.Tray;
 using Forms = System.Windows.Forms;
 
@@ -39,6 +40,9 @@ internal sealed class TrayIcon : IDisposable
 
     /// <summary>O que os itens de cada celular fazem (junto com <see cref="MenuSource"/>).</summary>
     public TrayCommands? Commands { get; set; }
+
+    /// <summary>Item "Iniciar com o Windows" (<c>null</c> no modo simulado: lá nada é gravado).</summary>
+    public StartWithWindows? Startup { get; set; }
 
     /// <summary>Depois de cada atualização do estado (na thread da interface).</summary>
     public event Action? Refreshed;
@@ -115,6 +119,15 @@ internal sealed class TrayIcon : IDisposable
             _menu.Items.Add(ModeItem(menu.GlobalMode));
         }
 
+        if (Startup is { } startup)
+        {
+            var enabled = startup.IsEnabled;
+            _menu.Items.Add(new Forms.ToolStripMenuItem("Iniciar com o Windows", null, (_, _) => SetStartup(startup, !enabled))
+            {
+                Checked = enabled,
+            });
+        }
+
         _menu.Items.Add(new Forms.ToolStripSeparator());
         _menu.Items.Add("Sair", null, (_, _) => _exit());
     }
@@ -177,6 +190,19 @@ internal sealed class TrayIcon : IDisposable
         if (answer == System.Windows.MessageBoxResult.Yes)
         {
             RunAsync(c => c.ForgetAsync(phone.Serial));
+        }
+    }
+
+    private async void SetStartup(StartWithWindows startup, bool enabled)
+    {
+        try
+        {
+            await startup.SetAsync(enabled);
+        }
+        catch (Exception ex)
+        {
+            OnError?.Invoke(ex);
+            ShowNotification(AppInfo.Name, "Não foi possível mudar a opção Iniciar com o Windows. Veja o log.", warning: true);
         }
     }
 
