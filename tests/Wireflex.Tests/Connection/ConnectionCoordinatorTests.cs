@@ -605,6 +605,29 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task OfflineEspelhando_FechaNaHoraEAvisoEsperaCincoSegundos()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await SendAsync(new DeviceStateChanged(Wifi(AdbDeviceState.Offline), AdbDeviceState.Device));
+
+        Assert.Equal("celular ficou offline", Assert.Single(_executor.Actions.OfType<CloseScrcpy>()).Reason);
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+
+        // Voltou antes dos 5 s: reabre uma vez, sem aviso.
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await SendAsync(new DeviceStateChanged(Wifi(), AdbDeviceState.Offline));
+        _time.Advance(OfflineDelay);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+    }
+
+    [Fact]
     public async Task OfflineVoltaEFicaOfflineDeNovo_ContaDoUltimoOffline()
     {
         Start(real: false);

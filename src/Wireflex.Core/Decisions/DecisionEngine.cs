@@ -224,15 +224,16 @@ public sealed class DecisionEngine
             phone.ClosedByUser = false;
             phone.AwaitingAnswer = false;
             phone.Ignored = false;
-            phone.ClearScrcpy();
 
             if (phone.Links.Count == 0)
             {
                 phone.LastNotice = null;
-                return [new DoNothing(serial, "fora do alcance (sem USB e sem Wi-Fi)")];
+                return phone.ScrcpyRunning
+                    ? CloseIfRunning(phone, "celular fora do alcance (sem USB e sem Wi-Fi)")
+                    : [new DoNothing(serial, "fora do alcance (sem USB e sem Wi-Fi)")];
             }
 
-            return Notice(phone, DeviceNotice.Offline);
+            return [.. CloseIfRunning(phone, "celular ficou offline"), .. Notice(phone, DeviceNotice.Offline)];
         }
 
         // Esquecido com o celular ainda ligado: fica quieto (nem abre, nem avisa) até sair do alcance e voltar.
@@ -250,19 +251,18 @@ public sealed class DecisionEngine
         var best = phone.Best;
         if (best is null)
         {
-            phone.ClearScrcpy();
             if (phone.Links.Values.Any(l => l.State == AdbDeviceState.Unauthorized))
             {
-                return Notice(phone, DeviceNotice.Unauthorized);
+                return [.. CloseIfRunning(phone, "celular sem autorização"), .. Notice(phone, DeviceNotice.Unauthorized)];
             }
 
             if (phone.Links.Values.Any(l => l.State == AdbDeviceState.Offline))
             {
-                return Notice(phone, DeviceNotice.Offline);
+                return [.. CloseIfRunning(phone, "celular ficou offline"), .. Notice(phone, DeviceNotice.Offline)];
             }
 
             var states = string.Join(", ", phone.Links.Values.Select(l => l.State).Distinct());
-            return [new DoNothing(serial, $"aguardando a conexão ficar pronta ({states})")];
+            return [.. CloseIfRunning(phone, "conexão não está pronta"), new DoNothing(serial, $"aguardando a conexão ficar pronta ({states})")];
         }
 
         phone.LastNotice = null;
@@ -327,6 +327,21 @@ public sealed class DecisionEngine
                 phone.SetScrcpy(best.AdbSerial, best.Transport);
                 return [new OpenScrcpy(serial, best.AdbSerial, best.Transport)];
         }
+    }
+
+    /// <summary>
+    /// O scrcpy aberto não vai funcionar sem conexão pronta: manda fechar em vez de só esquecer a marca, para o motor
+    /// e o executor concordarem (senão a saída dele chega depois como "scrcpy antigo" e a volta da conexão abriria outro).
+    /// </summary>
+    private static IReadOnlyList<EngineAction> CloseIfRunning(PhoneSession phone, string reason)
+    {
+        if (!phone.ScrcpyRunning)
+        {
+            return [];
+        }
+
+        phone.ClearScrcpy();
+        return [new CloseScrcpy(phone.Serial, reason)];
     }
 
     private IReadOnlyList<EngineAction> Notice(PhoneSession phone, DeviceNotice notice)
