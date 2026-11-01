@@ -1,0 +1,85 @@
+﻿Wireflex - versão beta
+======================
+
+O Wireflex mostra a tela do celular Android no PC (usando o scrcpy) e conecta
+sozinho quando você pluga o cabo USB ou quando o celular está no mesmo Wi-Fi.
+Fica no ícone da bandeja do Windows (perto do relógio).
+
+Esta é uma versão de teste (beta). Podem aparecer problemas: veja no fim como
+avisar.
+
+
+1. ANTES DE ABRIR: instalar o adb e o scrcpy
+---------------------------------------------
+Precisa do Windows 10 ou 11 (64 bits). Abra o PowerShell e rode:
+
+    winget install --id Google.PlatformTools
+    winget install --id Genymobile.scrcpy
+
+Depois feche e abra de novo a sessão do Windows (ou reinicie o PC), para o
+Windows achar os programas novos.
+
+No celular: ative as "Opções do desenvolvedor" e a "Depuração USB". Na primeira
+vez que plugar o cabo, o celular pergunta se confia neste computador: aceite.
+
+
+2. COMO ABRIR
+-------------
+1. Extraia o zip para uma pasta fixa (por exemplo, uma pasta Wireflex dentro de
+   Documentos). Não rode de dentro do zip.
+2. Abra o Wireflex.App.exe.
+3. O Windows pode mostrar "O Windows protegeu o computador" (SmartScreen),
+   porque o programa ainda não é assinado. Clique em "Mais informações" e
+   depois em "Executar assim mesmo".
+4. Nenhuma janela abre: o Wireflex aparece como um ícone azul na bandeja. Se não
+   estiver visível, clique na setinha (^) perto do relógio.
+5. Plugue o celular no cabo: o espelhamento abre em poucos segundos. Ao tirar o
+   cabo, ele continua pelo Wi-Fi (o celular precisa estar no mesmo Wi-Fi).
+
+Clique com o botão direito no ícone para ver cada celular e as opções: abrir
+agora, pausar, desativar, esquecer, modo de conexão e sair.
+
+
+3. ONDE FICAM A CONFIGURAÇÃO E OS LOGS
+--------------------------------------
+Configuração:  %APPDATA%\Wireflex\config.json
+Logs:          %LOCALAPPDATA%\Wireflex\logs   (um arquivo por dia)
+
+Dá para colar esses caminhos na barra de endereço do Explorador de Arquivos.
+
+
+4. INICIAR COM O WINDOWS
+------------------------
+No menu do ícone, o item "Iniciar com o Windows" liga e desliga essa opção.
+Para não abrir mais com o Windows, clique nele para desmarcar.
+
+Se mudar a pasta do Wireflex de lugar, abra uma vez o Wireflex.App.exe da pasta
+nova: ele atualiza o caminho sozinho. Antes de apagar a pasta, desmarque
+"Iniciar com o Windows".
+
+
+5. COMO REPORTAR UM PROBLEMA
+----------------------------
+Abra uma issue em:
+
+    https://github.com/Titanio112/Wireflex/issues
+
+Conte o que fez, o que esperava e o que aconteceu, com o horário aproximado.
+Anexe o log do dia (pasta de logs acima). O log já mascara o número de série
+dos celulares e os endereços IP (só aparecem os 4 últimos caracteres). Mesmo
+assim, dê uma olhada antes de anexar.
+
+
+6. O QUE AINDA NÃO TEM NESTA BETA
+---------------------------------
+- Conexão pela "Depuração sem fio" do Android 11+ (pareamento/mDNS): por
+  enquanto o Wi-Fi é ligado pelo cabo na primeira vez.
+- Encontrar o celular, temas, janela de configurações, editar o nome do
+  celular, instalador e atualização automática.
+
+
+7. COMO REMOVER
+---------------
+Desmarque "Iniciar com o Windows", clique em "Sair" no menu do ícone e apague a
+pasta do Wireflex. Se quiser apagar também a configuração e os logs, apague as
+pastas %APPDATA%\Wireflex e %LOCALAPPDATA%\Wireflex.
