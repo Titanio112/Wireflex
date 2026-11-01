@@ -1,0 +1,19 @@
+<Window x:Class="Wireflex.App.AskWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Wireflex"
+        SizeToContent="WidthAndHeight"
+        ResizeMode="NoResize"
+        WindowStyle="ToolWindow"
+        Topmost="True"
+        ShowActivated="False"
+        ShowInTaskbar="False">
+  <!-- Pergunta pequena no canto da tela, sem roubar o foco. Fechar no X = responder depois pelo menu. -->
+  <StackPanel Margin="16" MaxWidth="360">
+    <TextBlock x:Name="MessageText" TextWrapping="Wrap" Margin="0,0,0,12" />
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button Content="Sim, abrir" MinWidth="88" Margin="0,0,8,0" IsDefault="True" Click="OnYes" />
+      <Button Content="Não" MinWidth="88" Click="OnNo" />
+    </StackPanel>
+  </StackPanel>
+</Window>

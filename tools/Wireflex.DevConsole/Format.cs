@@ -40,6 +40,7 @@ internal static class Format
         PhonePhase.WaitingForAnswer => "aguardando resposta",
         PhonePhase.ClosedByUser => "fechado pelo usuário",
         PhonePhase.Idle => "disponível",
+        PhonePhase.Ignored => "esquecido (ignorado até sair do alcance)",
         _ => phase.ToString(),
     };
 

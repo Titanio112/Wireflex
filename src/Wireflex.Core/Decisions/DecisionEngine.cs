@@ -44,6 +44,8 @@ public sealed class DecisionEngine
             ScrcpyExited e => OnScrcpyExited(e),
             PhonePauseChanged e => OnPauseChanged(e),
             UserAnswered e => OnUserAnswered(e),
+            OpenRequested e => OnOpenRequested(e),
+            PhoneForgotten e => OnPhoneForgotten(e),
             Reevaluate e => OnReevaluate(e),
             _ => [new DoNothing(null, $"entrada desconhecida: {input.GetType().Name}")],
         };
@@ -151,6 +153,51 @@ public sealed class DecisionEngine
         return Evaluate(phone, allowOpen: true);
     }
 
+    private IReadOnlyList<EngineAction> OnOpenRequested(OpenRequested e)
+    {
+        if (!_phones.TryGetValue(e.Serial, out var phone) || !phone.InRange)
+        {
+            return [new DoNothing(e.Serial, "abrir agora: celular fora do alcance")];
+        }
+
+        if (phone.ScrcpyRunning)
+        {
+            return [new DoNothing(e.Serial, "abrir agora: scrcpy já aberto")];
+        }
+
+        string? refusal = phone.Ignored ? "celular esquecido"
+            : phone.Paused ? "celular pausado"
+            : _resolveConnectionMode(e.Serial) == ConnectionMode.Never ? "modo de conexão: nunca"
+            : phone.Best is null ? "conexão ainda não está pronta"
+            : null;
+        if (refusal is not null)
+        {
+            return [new DoNothing(e.Serial, $"abrir agora: {refusal}")];
+        }
+
+        var best = phone.Best!;
+        phone.ClosedByUser = false;
+        phone.AwaitingAnswer = false;
+        phone.SetScrcpy(best.AdbSerial, best.Transport);
+        return [new OpenScrcpy(phone.Serial, best.AdbSerial, best.Transport)];
+    }
+
+    private IReadOnlyList<EngineAction> OnPhoneForgotten(PhoneForgotten e)
+    {
+        var phone = GetOrCreate(e.Serial);
+        phone.Ignored = true;
+        phone.ClosedByUser = false;
+        phone.AwaitingAnswer = false;
+
+        // Sem conexões (ex: o coordenador ainda segurava os eventos): o Ignored vale quando elas chegarem.
+        if (phone.Links.Count == 0)
+        {
+            return [new DoNothing(e.Serial, "esquecido; ignorado até sair do alcance e voltar")];
+        }
+
+        return Evaluate(phone, allowOpen: false);
+    }
+
     private IReadOnlyList<EngineAction> OnReevaluate(Reevaluate e)
     {
         if (e.Serial is not null)
@@ -173,36 +220,49 @@ public sealed class DecisionEngine
 
         if (!phone.InRange)
         {
-            // Saiu do alcance: zera "fechado pelo usuário" e perguntas pendentes.
+            // Saiu do alcance: zera "fechado pelo usuário", "esquecido" e perguntas pendentes.
             phone.ClosedByUser = false;
             phone.AwaitingAnswer = false;
-            phone.ClearScrcpy();
+            phone.Ignored = false;
 
             if (phone.Links.Count == 0)
             {
                 phone.LastNotice = null;
-                return [new DoNothing(serial, "fora do alcance (sem USB e sem Wi-Fi)")];
+                return phone.ScrcpyRunning
+                    ? CloseIfRunning(phone, "celular fora do alcance (sem USB e sem Wi-Fi)")
+                    : [new DoNothing(serial, "fora do alcance (sem USB e sem Wi-Fi)")];
             }
 
-            return Notice(phone, DeviceNotice.Offline);
+            return [.. CloseIfRunning(phone, "celular ficou offline"), .. Notice(phone, DeviceNotice.Offline)];
+        }
+
+        // Esquecido com o celular ainda ligado: fica quieto (nem abre, nem avisa) até sair do alcance e voltar.
+        if (phone.Ignored)
+        {
+            if (phone.ScrcpyRunning)
+            {
+                phone.ClearScrcpy();
+                return [new CloseScrcpy(serial, "celular esquecido")];
+            }
+
+            return [new DoNothing(serial, "esquecido; ignorado até sair do alcance e voltar")];
         }
 
         var best = phone.Best;
         if (best is null)
         {
-            phone.ClearScrcpy();
             if (phone.Links.Values.Any(l => l.State == AdbDeviceState.Unauthorized))
             {
-                return Notice(phone, DeviceNotice.Unauthorized);
+                return [.. CloseIfRunning(phone, "celular sem autorização"), .. Notice(phone, DeviceNotice.Unauthorized)];
             }
 
             if (phone.Links.Values.Any(l => l.State == AdbDeviceState.Offline))
             {
-                return Notice(phone, DeviceNotice.Offline);
+                return [.. CloseIfRunning(phone, "celular ficou offline"), .. Notice(phone, DeviceNotice.Offline)];
             }
 
             var states = string.Join(", ", phone.Links.Values.Select(l => l.State).Distinct());
-            return [new DoNothing(serial, $"aguardando a conexão ficar pronta ({states})")];
+            return [.. CloseIfRunning(phone, "conexão não está pronta"), new DoNothing(serial, $"aguardando a conexão ficar pronta ({states})")];
         }
 
         phone.LastNotice = null;
@@ -216,6 +276,14 @@ public sealed class DecisionEngine
             }
 
             return [new DoNothing(serial, "celular pausado")];
+        }
+
+        var mode = _resolveConnectionMode(serial);
+        if (mode == ConnectionMode.Never && phone.ScrcpyRunning)
+        {
+            // Desativado (ou modo global nunca) com o scrcpy aberto: fecha.
+            phone.ClearScrcpy();
+            return [new CloseScrcpy(serial, "modo de conexão: nunca")];
         }
 
         if (phone.ScrcpyAdbSerial is { } currentAdbSerial)
@@ -248,7 +316,7 @@ public sealed class DecisionEngine
             return [new DoNothing(serial, "scrcpy encerrou sozinho; não reabre agora")];
         }
 
-        switch (_resolveConnectionMode(serial))
+        switch (mode)
         {
             case ConnectionMode.Never:
                 return [new DoNothing(serial, "modo de conexão: nunca")];
@@ -259,6 +327,21 @@ public sealed class DecisionEngine
                 phone.SetScrcpy(best.AdbSerial, best.Transport);
                 return [new OpenScrcpy(serial, best.AdbSerial, best.Transport)];
         }
+    }
+
+    /// <summary>
+    /// O scrcpy aberto não vai funcionar sem conexão pronta: manda fechar em vez de só esquecer a marca, para o motor
+    /// e o executor concordarem (senão a saída dele chega depois como "scrcpy antigo" e a volta da conexão abriria outro).
+    /// </summary>
+    private static IReadOnlyList<EngineAction> CloseIfRunning(PhoneSession phone, string reason)
+    {
+        if (!phone.ScrcpyRunning)
+        {
+            return [];
+        }
+
+        phone.ClearScrcpy();
+        return [new CloseScrcpy(phone.Serial, reason)];
     }
 
     private IReadOnlyList<EngineAction> Notice(PhoneSession phone, DeviceNotice notice)
@@ -311,6 +394,9 @@ public sealed class DecisionEngine
 
         public bool Paused { get; set; }
 
+        /// <summary>Esquecido pelo usuário enquanto estava ao alcance: ignorado até sair do alcance e voltar.</summary>
+        public bool Ignored { get; set; }
+
         public DeviceNotice? LastNotice { get; set; }
 
         public bool ScrcpyRunning => ScrcpyAdbSerial is not null;
@@ -325,6 +411,7 @@ public sealed class DecisionEngine
 
         public PhonePhase Phase =>
             !InRange ? PhonePhase.OutOfRange
+            : Ignored ? PhonePhase.Ignored
             : Best is null ? PhonePhase.Unavailable
             : Paused ? PhonePhase.Paused
             : ScrcpyRunning ? PhonePhase.Mirroring

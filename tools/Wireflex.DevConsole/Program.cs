@@ -5,10 +5,8 @@ using Wireflex.Core;
 using Wireflex.Core.Adb;
 using Wireflex.Core.Configuration;
 using Wireflex.Core.Connection;
-using Wireflex.Core.Decisions;
-using Wireflex.Core.Execution;
+using Wireflex.Core.Hosting;
 using Wireflex.Core.Logging;
-using Wireflex.Core.Monitoring;
 using Wireflex.Core.Scrcpy;
 using Wireflex.DevConsole;
 using Wireflex.Windows;
@@ -49,7 +47,7 @@ if (options.ConnectionMode is { } mode)
     config.Global.ConnectionMode = mode;
 }
 
-if (!TryResolve("adb", options.AdbPath, config.Global.AdbPath, AdbLocator.Find, out var adbPath, out var adbSource))
+if (ToolPaths.Resolve(options.AdbPath, config.Global.AdbPath, AdbLocator.Find) is not { } adb)
 {
     output.Error(options.AdbPath is not null
         ? $"adb não encontrado em: {options.AdbPath}"
@@ -57,12 +55,12 @@ if (!TryResolve("adb", options.AdbPath, config.Global.AdbPath, AdbLocator.Find, 
     return 1;
 }
 
-output.Info($"adb ({adbSource}): {adbPath}");
+output.Info($"adb ({Source("adb", adb.Source)}): {adb.Path}");
 
-var hasScrcpy = TryResolve("scrcpy", options.ScrcpyPath, config.Global.ScrcpyPath, ScrcpyLocator.Find, out var scrcpyPath, out var scrcpySource);
-if (hasScrcpy)
+var scrcpy = ToolPaths.Resolve(options.ScrcpyPath, config.Global.ScrcpyPath, ScrcpyLocator.Find);
+if (scrcpy is not null)
 {
-    output.Info($"scrcpy ({scrcpySource}): {scrcpyPath}");
+    output.Info($"scrcpy ({Source("scrcpy", scrcpy.Source)}): {scrcpy.Path}");
 }
 else if (options.Real)
 {
@@ -93,36 +91,26 @@ output.Info("Monitor ligado. Digite h para ver os comandos. Ctrl+C encerra.");
 
 var session = new DevSession(config, output, options.Real);
 var catalog = new PhoneCatalog(stored ?? new WireflexConfig(), options.Real ? configStore : null, loggerFactory.CreateLogger<PhoneCatalog>());
-var adb = new AdbClient(adbPath, loggerFactory.CreateLogger<AdbClient>());
 
 // Os scrcpy ficam amarrados a este processo: se ele morrer (até à força), eles morrem junto.
 using var guard = options.Real ? new JobObjectProcessGuard() : null;
 
-ConnectionCoordinator? coordinator = null;
-var scrcpyExecutor = options.Real
-    ? new ScrcpyActionExecutor(
-        new ScrcpyLauncher(scrcpyPath!, adbPath, guard, loggerFactory.CreateLogger<ScrcpyLauncher>()),
-        session,
-        serial => "Wireflex - " + catalog.DisplayName(serial),
-        input => coordinator?.Post(input),
-        loggerFactory.CreateLogger<ScrcpyActionExecutor>(),
-        windowTitleForLog: serial => "Wireflex - " + catalog.DisplayNameForLog(serial),
-        windowCheckDelay: TimeSpan.FromSeconds(1))
-    : null;
-IActionExecutor executor = scrcpyExecutor ?? (IActionExecutor)new SimulatedActionExecutor();
-session.Windows = scrcpyExecutor is null ? null : scrcpyExecutor.Windows;
+var runtime = new WireflexRuntime(new WireflexRuntimeSettings
+{
+    AdbPath = adb.Path,
+    ScrcpyPath = scrcpy?.Path,
+    Real = options.Real,
+    Catalog = catalog,
+    Notifier = session,
+    Observer = session,
 
-coordinator = new ConnectionCoordinator(
-    new DecisionEngine(serial => config.ResolveConnectionMode(serial)),
-    executor,
-    adb,
-    catalog,
-    new ConnectionCoordinatorOptions { PrepareWifi = options.Real, ReconnectWifi = options.Real },
-    session,
-    loggerFactory);
-session.Coordinator = coordinator;
-
-var monitor = new DeviceMonitor(adb, new DeviceMonitorOptions(), loggerFactory.CreateLogger<DeviceMonitor>());
+    // A cópia da sessão: --modo e o comando m valem só aqui.
+    ResolveConnectionMode = serial => config.ResolveConnectionMode(serial),
+    Guard = guard,
+    LoggerFactory = loggerFactory,
+});
+session.Windows = runtime.Scrcpy is { } scrcpyExecutor ? scrcpyExecutor.Windows : null;
+session.Coordinator = runtime.Coordinator;
 
 using var shutdown = new CancellationTokenSource();
 
@@ -144,21 +132,7 @@ using var onQuit = PosixSignalRegistration.Create(PosixSignal.SIGQUIT, RequestSh
 using var onTerminate = PosixSignalRegistration.Create(PosixSignal.SIGTERM, RequestShutdown);
 using var onHangUp = PosixSignalRegistration.Create(PosixSignal.SIGHUP, RequestShutdown);
 
-var monitorTask = monitor.RunAsync(shutdown.Token);
-var coordinatorTask = Task.Run(async () =>
-{
-    try
-    {
-        await coordinator.RunAsync(monitor.Events, shutdown.Token);
-    }
-    catch (Exception ex) when (ex is not OperationCanceledException)
-    {
-        // Sem isto o monitor seguiria rodando sem mostrar nada até o Ctrl+C.
-        output.Error($"Falha ao processar eventos: {ex.GetType().Name}: {ex.Message}. Encerrando.");
-        shutdown.Cancel();
-        throw;
-    }
-});
+var runTask = runtime.RunAsync(shutdown.Token);
 
 // Console.ReadLine bloqueia; fica numa thread de fundo para não segurar o encerramento.
 var inputThread = new Thread(() =>
@@ -196,47 +170,24 @@ inputThread.Start();
 
 try
 {
-    await Task.WhenAll(monitorTask, coordinatorTask);
+    await runTask;
 }
 catch (Exception ex) when (ex is not OperationCanceledException)
 {
-    output.Error($"Falha inesperada: {ex.GetType().Name}: {ex.Message}");
+    // O monitor já parou junto com o coordenador.
+    output.Error($"Falha ao processar eventos: {ex.GetType().Name}: {ex.Message}. Encerrado.");
     return 1;
 }
 
 output.Info("Encerrado.");
 return 0;
 
-// Ordem: opção da linha de comando (sem cair para outro se não existir), depois a config, depois o PATH.
-static bool TryResolve(
-    string name,
-    string? fromOption,
-    string? fromConfig,
-    Func<string?, string?> find,
-    out string path,
-    out string source)
+static string Source(string name, ToolSource source) => source switch
 {
-    string? found;
-    if (fromOption is not null)
-    {
-        found = find(fromOption);
-        source = $"do --{name}";
-    }
-    else if (!string.IsNullOrWhiteSpace(fromConfig) && find(fromConfig) is { } configured)
-    {
-        found = configured;
-        source = "da configuração";
-    }
-    else
-    {
-        // find(null) procura no PATH.
-        found = find(null);
-        source = "do PATH";
-    }
-
-    path = found ?? string.Empty;
-    return found is not null;
-}
+    ToolSource.Option => $"do --{name}",
+    ToolSource.Config => "da configuração",
+    _ => "do PATH",
+};
 
 static WireflexConfig Clone(WireflexConfig config) => new()
 {

@@ -76,6 +76,12 @@ internal sealed class ScriptedAdbClient : IAdbClient
         return Connect(host, port);
     }
 
+    public Task<bool> DisconnectAsync(string host, int port, CancellationToken cancellationToken = default)
+    {
+        Record($"disconnect {host}:{port}");
+        return Task.FromResult(true);
+    }
+
     private void Record(string call)
     {
         lock (_sync)

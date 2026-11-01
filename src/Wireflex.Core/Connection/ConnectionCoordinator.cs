@@ -30,6 +30,9 @@ public sealed class ConnectionCoordinatorOptions
     /// <summary>Tenta conectar por Wi-Fi os celulares conhecidos que estão fora do adb.</summary>
     public bool ReconnectWifi { get; init; }
 
+    /// <summary>Ao esquecer um celular, roda <c>adb disconnect</c> do Wi-Fi dele (só no modo real).</summary>
+    public bool DisconnectWifiOnForget { get; init; }
+
     public int TcpipPort { get; init; } = WifiPreparer.DefaultTcpipPort;
 
     /// <summary>
@@ -61,6 +64,19 @@ public sealed class ConnectionCoordinatorOptions
 
     /// <summary>Máximo de novas tentativas seguidas por celular, até a conexão mudar ou um scrcpy ficar aberto.</summary>
     public int ScrcpyRetryLimit { get; init; } = 3;
+
+    /// <summary>
+    /// Esperas antes de reabrir um scrcpy que caiu no meio do uso (aberto há mais de 10 s) com o celular ainda online.
+    /// A quantidade é o máximo de reaberturas dentro de <see cref="ScrcpyDropWindow"/>.
+    /// </summary>
+    public IReadOnlyList<TimeSpan> ScrcpyDropReopenDelays { get; init; } =
+        [TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30)];
+
+    /// <summary>Janela em que as reaberturas depois de queda são contadas.</summary>
+    public TimeSpan ScrcpyDropWindow { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>Scrcpy aberto por mais tempo que isto antes de cair zera a contagem de quedas.</summary>
+    public TimeSpan ScrcpyDropResetRuntime { get; init; } = TimeSpan.FromMinutes(2);
 
     /// <summary>
     /// Quanto tempo o celular precisa ficar offline para o aviso sair. Logo depois de tirar o cabo o Wi-Fi costuma
@@ -119,7 +135,11 @@ public sealed class ConnectionCoordinator
 
     // Novas tentativas de abrir o scrcpy depois de ele falhar ao iniciar.
     private readonly Dictionary<string, ScrcpyRetryState> _scrcpyRetries = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ScrcpyDropState> _scrcpyDrops = new(StringComparer.Ordinal);
     private int _scrcpyRetryGeneration;
+
+    // Esquecidos ainda ao alcance: não aprende, não prepara nem reconecta até saírem do alcance.
+    private readonly HashSet<string> _forgotten = new(StringComparer.Ordinal);
 
     // Aviso de offline esperando para ver se o offline dura (geração por celular).
     private readonly Dictionary<string, int> _pendingOfflineNotices = new(StringComparer.Ordinal);
@@ -174,6 +194,23 @@ public sealed class ConnectionCoordinator
     {
         ArgumentNullException.ThrowIfNull(deviceEvent);
         _inbox.Writer.TryWrite(new MonitorMessage(deviceEvent));
+    }
+
+    /// <summary>
+    /// Esquece o celular: tira da config e desconecta o Wi-Fi dele (<c>adb disconnect</c>). Se ele ainda estiver
+    /// ao alcance, o scrcpy fecha e ele fica ignorado (sem abrir, aprender nem reconectar) até sair do alcance e voltar.
+    /// Completa quando a fila processou o pedido.
+    /// </summary>
+    public Task ForgetAsync(string serial)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(serial);
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_inbox.Writer.TryWrite(new ForgetMessage(serial, done)))
+        {
+            done.TrySetResult();
+        }
+
+        return done.Task;
     }
 
     /// <summary>Estado de cada celular no motor.</summary>
@@ -272,15 +309,29 @@ public sealed class ConnectionCoordinator
                 break;
             case InputMessage i:
                 await ApplyAsync(i.Input, cancellationToken).ConfigureAwait(false);
-                OnInputApplied(i.Input);
+                await OnInputAppliedAsync(i.Input, cancellationToken).ConfigureAwait(false);
                 break;
             case ScrcpyRetryMessage r:
                 await OnScrcpyRetryAsync(r, cancellationToken).ConfigureAwait(false);
                 break;
+            case ScrcpyDropReopenMessage d:
+                await OnScrcpyDropReopenAsync(d, cancellationToken).ConfigureAwait(false);
+                break;
             case OfflineNoticeMessage o:
                 await OnOfflineNoticeDueAsync(o, cancellationToken).ConfigureAwait(false);
                 break;
-            case LearnedMessage l:
+            case ForgetMessage f:
+                try
+                {
+                    await OnForgetAsync(f.Serial, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    f.Done.TrySetResult();
+                }
+
+                break;
+            case LearnedMessage l when !_forgotten.Contains(l.Serial):
                 // Grava já: se o tcpip/connect demorar ou falhar, o IP e o nome não se perdem.
                 await _catalog.LearnAsync(l.Serial, friendlyName: l.DeviceName, ip: l.Ip, cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
@@ -367,7 +418,14 @@ public sealed class ConnectionCoordinator
         // A conexão mudou: o motor reavalia por conta própria e as novas tentativas recomeçam do zero.
         ResetScrcpyRetries(serial);
 
-        if (_connections.ContainsKey(connection.AdbSerial) && connection.State == AdbDeviceState.Device)
+        // Esquecido saiu do alcance (sem cabo e sem Wi-Fi): da próxima vez que aparecer, é um celular novo.
+        if (!InRange(serial))
+        {
+            _forgotten.Remove(serial);
+        }
+
+        if (_connections.ContainsKey(connection.AdbSerial) && connection.State == AdbDeviceState.Device
+            && !_forgotten.Contains(serial))
         {
             if (connection.Transport != AdbTransport.Usb)
             {
@@ -422,7 +480,7 @@ public sealed class ConnectionCoordinator
 
     private void MaybeStartPreparation(string serial)
     {
-        if (!_options.PrepareWifi || !_adbAvailable || _prepared.Contains(serial))
+        if (!_options.PrepareWifi || !_adbAvailable || _prepared.Contains(serial) || _forgotten.Contains(serial))
         {
             return;
         }
@@ -556,7 +614,7 @@ public sealed class ConnectionCoordinator
             // Acabou de conectar: o Wi-Fi ainda pode não ter aparecido no monitor. A reconexão espera a rodada.
             _reconnect[serial] = new ReconnectState(_time.GetUtcNow() + _options.ReconnectInterval, _options.ReconnectInterval);
         }
-        if (message.Result is { } result)
+        if (message.Result is { } result && !_forgotten.Contains(serial))
         {
             await _catalog.LearnAsync(serial, friendlyName: result.DeviceName, ip: result.Ip, cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
@@ -591,7 +649,7 @@ public sealed class ConnectionCoordinator
     /// estado do adb mudar. Se ele falhou logo ao abrir e nada mudar, o celular ficaria sem espelho: tenta de novo,
     /// no máximo <see cref="ConnectionCoordinatorOptions.ScrcpyRetryLimit"/> vezes seguidas.
     /// </summary>
-    private void OnInputApplied(EngineInput input)
+    private async Task OnInputAppliedAsync(EngineInput input, CancellationToken cancellationToken)
     {
         switch (input)
         {
@@ -599,8 +657,9 @@ public sealed class ConnectionCoordinator
                 ScheduleScrcpyRetry(e.Serial);
                 break;
             case ScrcpyExited e when e.Runtime > ScrcpyExit.StartupWindow:
-                // Ficou aberto um tempo: a sequência de falhas acabou.
-                ResetScrcpyRetries(e.Serial);
+                // Ficou aberto um tempo: a sequência de falhas ao abrir acabou. Caiu no meio do uso: reabre poucas vezes.
+                _scrcpyRetries.Remove(e.Serial);
+                await ScheduleScrcpyDropReopenAsync(e.Serial, e.Runtime, cancellationToken).ConfigureAwait(false);
                 break;
             case ScrcpyClosedByUser e:
                 ResetScrcpyRetries(e.Serial);
@@ -619,7 +678,8 @@ public sealed class ConnectionCoordinator
             _scrcpyRetries[serial] = state;
         }
 
-        if (state.Attempts >= _options.ScrcpyRetryLimit)
+        // Teto comum com as reaberturas depois de queda: nunca mais de ScrcpyRetryLimit seguidas.
+        if (state.Attempts + RecentDrops(serial) >= _options.ScrcpyRetryLimit)
         {
             Note($"O scrcpy de {Sensitive.Mask(serial)} falhou ao abrir {state.Attempts + 1} vezes seguidas; só tenta de novo quando a conexão mudar");
             return;
@@ -655,8 +715,89 @@ public sealed class ConnectionCoordinator
             .ConfigureAwait(false);
     }
 
-    /// <summary>Zera as novas tentativas; uma tentativa já agendada é descartada.</summary>
-    private void ResetScrcpyRetries(string serial) => _scrcpyRetries.Remove(serial);
+    /// <summary>
+    /// O scrcpy caiu depois de aberto (ex: Wi-Fi oscilou) e o adb pode nem ter notado: sem isto o celular ficaria
+    /// sem espelho até a conexão mudar. Espera um pouco (um evento do monitor nesse meio-tempo cancela e o fluxo
+    /// normal assume) e pede ao motor para reavaliar. No máximo <see cref="ConnectionCoordinatorOptions.ScrcpyDropReopenDelays"/>
+    /// vezes em <see cref="ConnectionCoordinatorOptions.ScrcpyDropWindow"/>; esgotou, avisa uma vez e para.
+    /// </summary>
+    private async Task ScheduleScrcpyDropReopenAsync(string serial, TimeSpan runtime, CancellationToken cancellationToken)
+    {
+        if (runtime >= _options.ScrcpyDropResetRuntime)
+        {
+            _scrcpyDrops.Remove(serial);
+        }
+
+        if (!_scrcpyDrops.TryGetValue(serial, out var state))
+        {
+            state = new ScrcpyDropState();
+            _scrcpyDrops[serial] = state;
+        }
+
+        var delays = _options.ScrcpyDropReopenDelays;
+        var count = RecentDrops(serial);
+        if (count >= delays.Count || count >= _options.ScrcpyRetryLimit)
+        {
+            Note($"O espelhamento de {Sensitive.Mask(serial)} caiu {count + 1} vezes em {_options.ScrcpyDropWindow.TotalMinutes:0} min; só reabre quando a conexão mudar ou pelo menu");
+            if (!state.Notified)
+            {
+                state.Notified = true;
+                await ExecuteAsync(new NotifyUser(serial, DeviceNotice.MirroringKeepsDropping), cancellationToken).ConfigureAwait(false);
+            }
+
+            return;
+        }
+
+        state.Times.Add(_time.GetTimestamp());
+        state.Generation = ++_scrcpyRetryGeneration;
+        Note($"O espelhamento de {Sensitive.Mask(serial)} caiu; reabre em {delays[count].TotalSeconds:0} s se o celular continuar online ({count + 1} de {delays.Count})");
+        _background.Add(ScrcpyDropReopenLaterAsync(serial, state.Generation, delays[count]));
+    }
+
+    private async Task ScrcpyDropReopenLaterAsync(string serial, int generation, TimeSpan delay)
+    {
+        try
+        {
+            await Task.Delay(delay, _time, _stopToken).ConfigureAwait(false);
+            _inbox.Writer.TryWrite(new ScrcpyDropReopenMessage(serial, generation));
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task OnScrcpyDropReopenAsync(ScrcpyDropReopenMessage message, CancellationToken cancellationToken)
+    {
+        if (!_scrcpyDrops.TryGetValue(message.Serial, out var state) || state.Generation != message.Generation)
+        {
+            return;
+        }
+
+        // O motor decide: não abre se o usuário fechou, pausou, desativou, esqueceu, ou se o celular não está pronto.
+        await ApplyAsync(new Reevaluate(message.Serial, "reabrir depois de o espelhamento cair"), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>Reaberturas depois de queda dentro da janela de <see cref="ConnectionCoordinatorOptions.ScrcpyDropWindow"/>.</summary>
+    private int RecentDrops(string serial)
+    {
+        if (!_scrcpyDrops.TryGetValue(serial, out var state))
+        {
+            return 0;
+        }
+
+        state.Times.RemoveAll(t => _time.GetElapsedTime(t) > _options.ScrcpyDropWindow);
+        return state.Times.Count;
+    }
+
+    /// <summary>
+    /// Zera as novas tentativas e a contagem de quedas; o que já estiver agendado é descartado.
+    /// </summary>
+    private void ResetScrcpyRetries(string serial)
+    {
+        _scrcpyRetries.Remove(serial);
+        _scrcpyDrops.Remove(serial);
+    }
 
     private async Task ReleaseAsync(string serial, CancellationToken cancellationToken)
     {
@@ -904,6 +1045,70 @@ public sealed class ConnectionCoordinator
         state.NextAttempt = _time.GetUtcNow() + state.Delay;
     }
 
+    private async Task OnForgetAsync(string serial, CancellationToken cancellationToken)
+    {
+        var lastIp = _catalog.Find(serial)?.LastKnownIp;
+        await _catalog.ForgetAsync(serial, cancellationToken).ConfigureAwait(false);
+        _reconnect.Remove(serial);
+        ResetScrcpyRetries(serial);
+        _pendingOfflineNotices.Remove(serial);
+
+        // Desconecta o Wi-Fi: o da conexão atual e o do último IP conhecido (pode ser o mesmo).
+        var wifi = _connections.Values
+            .Where(c => c.Key == serial && c.Transport == AdbTransport.WifiTcpip)
+            .Select(c => c.AdbSerial)
+            .ToList();
+        if (lastIp is not null)
+        {
+            wifi.Add(lastIp + ":" + _options.TcpipPort.ToString(CultureInfo.InvariantCulture));
+        }
+
+        foreach (var adbSerial in wifi.Distinct(StringComparer.Ordinal))
+        {
+            if (_options.DisconnectWifiOnForget && AdbSerialClassifier.TryParseHostPort(adbSerial, out var host, out var port))
+            {
+                _background.Add(DisconnectAsync(serial, host, port));
+            }
+        }
+
+        if (!InRange(serial))
+        {
+            Note($"{Sensitive.Mask(serial)} esquecido");
+            return;
+        }
+
+        // Ainda ligado: fica ignorado até sair do alcance. Se os eventos estavam retidos (preparação), o motor
+        // recebe o "esquecido" antes das conexões, para não abrir.
+        _forgotten.Add(serial);
+        _holds.Remove(serial);
+        Note($"{Sensitive.Mask(serial)} esquecido; fica ignorado até sair do alcance (sem cabo e sem Wi-Fi) e voltar");
+        await ApplyAsync(new PhoneForgotten(serial), cancellationToken).ConfigureAwait(false);
+        await SyncAsync(serial, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task DisconnectAsync(string serial, string host, int port)
+    {
+        using var timeout = new CancellationTokenSource(_options.Preparer.ConnectAttemptTimeout, _time);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(_stopToken, timeout.Token);
+        try
+        {
+            var disconnected = await _adb.DisconnectAsync(host, port, linked.Token).ConfigureAwait(false);
+            _logger.LogInformation(
+                "adb disconnect de {Phone} ({Address}): {Result}",
+                Sensitive.Mask(serial),
+                Sensitive.MaskAdbSerial(host + ":" + port.ToString(CultureInfo.InvariantCulture)),
+                disconnected ? "desconectado" : "não estava conectado");
+        }
+        catch (Exception ex) when (ex is AdbException or IOException or OperationCanceledException)
+        {
+            _logger.LogWarning("adb disconnect de {Phone} falhou: {Error}", Sensitive.Mask(serial), Sensitive.Scrub(ex.Message));
+        }
+    }
+
+    /// <summary>Ao alcance: alguma conexão que não seja offline (a mesma regra do motor).</summary>
+    private bool InRange(string serial) =>
+        _connections.Values.Any(c => c.Key == serial && c.State != AdbDeviceState.Offline);
+
     private bool HasUsb(string serial) =>
         _connections.Values.Any(c => c.Key == serial && c.Transport == AdbTransport.Usb);
 
@@ -983,11 +1188,26 @@ public sealed class ConnectionCoordinator
         public int Generation { get; set; }
     }
 
+    private sealed class ScrcpyDropState
+    {
+        /// <summary>Quando cada reabertura depois de queda foi agendada (para a janela de tempo).</summary>
+        public List<long> Times { get; } = [];
+
+        public int Generation { get; set; }
+
+        /// <summary>O aviso de "caiu várias vezes" já saiu nesta sequência.</summary>
+        public bool Notified { get; set; }
+    }
+
     private abstract record Message;
 
     private sealed record ScrcpyRetryMessage(string Serial, int Generation) : Message;
 
+    private sealed record ScrcpyDropReopenMessage(string Serial, int Generation) : Message;
+
     private sealed record OfflineNoticeMessage(string Serial, int Generation, EngineAction Notice) : Message;
+
+    private sealed record ForgetMessage(string Serial, TaskCompletionSource Done) : Message;
 
     private sealed record MonitorMessage(DeviceEvent Event) : Message;
 

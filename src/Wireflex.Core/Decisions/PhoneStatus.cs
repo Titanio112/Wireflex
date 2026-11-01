@@ -35,4 +35,7 @@ public enum PhonePhase
 
     /// <summary>Disponível, sem nada aberto (ex: modo "nunca").</summary>
     Idle,
+
+    /// <summary>Esquecido pelo usuário com o celular ligado: ignorado até sair do alcance e voltar.</summary>
+    Ignored,
 }

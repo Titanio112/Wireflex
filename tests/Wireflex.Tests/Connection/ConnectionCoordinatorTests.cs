@@ -5,6 +5,7 @@ using Wireflex.Core.Connection;
 using Wireflex.Core.Decisions;
 using Wireflex.Core.Execution;
 using Wireflex.Core.Monitoring;
+using Wireflex.Core.Tray;
 using Wireflex.Tests.Fakes;
 
 namespace Wireflex.Tests.Connection;
@@ -24,6 +25,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfflineDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan[] DropDelays = [TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30)];
 
     private readonly TimerTrackingTimeProvider _time = new();
     private readonly ScriptedAdbClient _adb = new();
@@ -569,6 +571,141 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task ScrcpyCaiNoMeioDoUso_ReabreDepoisDeTresSegundos()
+    {
+        await MirroringByCableAsync();
+
+        // #41: caiu com o celular ainda online e nenhum evento do adb.
+        await DropAsync(TimeSpan.FromSeconds(60));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyCaiComMenosDeDezSegundos_NaoEQuedaNoMeioDoUso()
+    {
+        await MirroringByCableAsync();
+
+        await DropAsync(TimeSpan.FromSeconds(4));
+        _time.Advance(DropDelays[^1]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_PausadoAntesDaEspera_NaoReabre()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+
+        _coordinator.Post(new PhonePauseChanged(Phone, true));
+        await IdleAsync();
+        _time.Advance(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_DesativadoAntesDaEspera_NaoReabre()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+
+        await _catalog.SetPhoneConnectionModeAsync(Phone, ConnectionMode.Never);
+        _time.Advance(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_EventoDoMonitorNaEspera_CancelaEOFluxoNormalAssume()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+
+        // O adb percebeu a queda: o celular saiu do alcance; o timer não pode reabrir.
+        await SendAsync(new DeviceDisappeared(Usb()));
+        _time.Advance(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_NoMaximoTresReaberturasEUmAvisoSo()
+    {
+        await MirroringByCableAsync();
+        foreach (var delay in DropDelays)
+        {
+            await DropAsync(TimeSpan.FromSeconds(20));
+            await _time.AdvanceWhenTimerCreatedAsync(delay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+
+        await DropAsync(TimeSpan.FromSeconds(20));
+        await DropAsync(TimeSpan.FromSeconds(20));
+        _time.Advance(DropDelays[^1]);
+        await IdleAsync();
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+        var notice = Assert.Single(_executor.Actions.OfType<NotifyUser>());
+        Assert.Equal(DeviceNotice.MirroringKeepsDropping, notice.Notice);
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_DepoisDeCincoMinutos_VoltaAReabrir()
+    {
+        await UseAllDropsAsync();
+
+        _time.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
+        await DropAsync(TimeSpan.FromSeconds(20));
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Equal(5, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_DepoisDeDoisMinutosAberto_ZeraAContagem()
+    {
+        await UseAllDropsAsync();
+
+        await DropAsync(TimeSpan.FromMinutes(3));
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Equal(5, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_ReaberturaQueFalhaAoAbrir_TetoComumDeTres()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        // A reabertura falha ao abrir: as tentativas da #24 contam junto (1 queda + 2 tentativas = 3).
+        for (var i = 0; i < 3; i++)
+        {
+            await FailAtStartAsync();
+            _time.Advance(RetryDelay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
     public async Task OfflineCurto_NaoAvisa()
     {
         Start(real: false);
@@ -604,6 +741,29 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task OfflineEspelhando_FechaNaHoraEAvisoEsperaCincoSegundos()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await SendAsync(new DeviceStateChanged(Wifi(AdbDeviceState.Offline), AdbDeviceState.Device));
+
+        Assert.Equal("celular ficou offline", Assert.Single(_executor.Actions.OfType<CloseScrcpy>()).Reason);
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+
+        // Voltou antes dos 5 s: reabre uma vez, sem aviso.
+        _time.Advance(TimeSpan.FromSeconds(1));
+        await SendAsync(new DeviceStateChanged(Wifi(), AdbDeviceState.Offline));
+        _time.Advance(OfflineDelay);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+        Assert.Empty(_executor.Actions.OfType<NotifyUser>());
+    }
+
+    [Fact]
     public async Task OfflineVoltaEFicaOfflineDeNovo_ContaDoUltimoOffline()
     {
         Start(real: false);
@@ -629,6 +789,174 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task Esquecer_NoCabo_FechaDesconectaEIgnoraAteSairDoAlcance()
+    {
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        var stored = new WireflexConfig();
+        stored.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        Start(real: true, stored);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        await SendAsync(new DeviceAppeared(Wifi()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await Commands().ForgetAsync(Phone);
+        await IdleAsync();
+
+        // Fecha, sai da config e desconecta o Wi-Fi (uma vez: o IP gravado e a conexão atual são o mesmo).
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+        Assert.Null(_store.Last!.FindPhone(Phone));
+        Assert.Equal(1, _adb.Count($"disconnect {WifiSerial}"));
+        Assert.Equal(PhonePhase.Ignored, Assert.Single(_coordinator.GetStatus()).Phase);
+
+        // Ainda no cabo: o Wi-Fi some e outros eventos chegam, e nada abre nem volta para a config.
+        await SendAsync(new DeviceDisappeared(Wifi()));
+        await SendAsync(new DeviceStateChanged(Usb(), AdbDeviceState.Device));
+        _coordinator.Post(new Reevaluate(null, "teste"));
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+        Assert.Null(_store.Last!.FindPhone(Phone));
+
+        // Tirou o cabo (fora do alcance) e plugou de novo: é um celular novo, que abre e é aprendido.
+        await SendAsync(new DeviceDisappeared(Usb()));
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+        Assert.NotNull(_store.Last!.FindPhone(Phone));
+    }
+
+    [Fact]
+    public async Task Esquecer_SoPeloWifi_DesconectaENaoReconecta()
+    {
+        Start(real: true);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+        Assert.Equal(Ip, _catalog.Find(Phone)!.LastKnownIp);
+
+        await Commands().ForgetAsync(Phone);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+        Assert.Equal(1, _adb.Count($"disconnect {WifiSerial}"));
+
+        // O disconnect derruba o Wi-Fi: fora do alcance, e a reconexão não tem mais o IP.
+        await SendAsync(new DeviceDisappeared(Wifi()));
+        await TickAsync();
+        Assert.Equal(0, _adb.Count("connect"));
+        Assert.Null(_catalog.Find(Phone));
+    }
+
+    [Fact]
+    public async Task Esquecer_ForaDoAlcance_SoTiraDaConfig()
+    {
+        var stored = new WireflexConfig();
+        stored.Phones.Add(new KnownPhone { Serial = Phone, LastKnownIp = Ip });
+        Start(real: true, stored);
+        await AdbAvailableAsync();
+
+        await Commands().ForgetAsync(Phone);
+        await IdleAsync();
+
+        Assert.Null(_store.Last!.FindPhone(Phone));
+        Assert.Empty(_coordinator.GetStatus());
+
+        // Volta pelo cabo: abre normalmente.
+        await SendAsync(new DeviceAppeared(Usb()));
+        await _time.AdvanceWhenTimerCreatedAsync(StableWindow);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task Desativar_SoPeloWifi_GravaEFecha()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        await Commands().SetEnabledAsync(Phone, enabled: false);
+        await IdleAsync();
+
+        Assert.Equal(ConnectionMode.Never, _catalog.Find(Phone)!.Settings.ConnectionMode);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        await Commands().SetEnabledAsync(Phone, enabled: true);
+        await IdleAsync();
+        Assert.Null(_catalog.Find(Phone)!.Settings.ConnectionMode);
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task PausarERetomar_SoPeloWifi()
+    {
+        Start(real: false);
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Wifi()));
+
+        Commands().SetPaused(Phone, true);
+        await IdleAsync();
+        Assert.Equal(PhonePhase.Paused, Assert.Single(_coordinator.GetStatus()).Phase);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        Commands().SetPaused(Phone, false);
+        await IdleAsync();
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ModoGlobal_GravaEReavaliaTodosNaHora()
+    {
+        Start(real: true, new WireflexConfig());
+        await AdbAvailableAsync();
+        _adb.Shell["getprop service.adb.tcp.port"] = "5555\n";
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Never);
+        await IdleAsync();
+        Assert.Equal(ConnectionMode.Never, _store.Last!.Global.ConnectionMode);
+        Assert.Single(_executor.Actions.OfType<CloseScrcpy>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Ask);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<AskUser>());
+
+        await Commands().SetGlobalModeAsync(ConnectionMode.Automatic);
+        await IdleAsync();
+        Assert.Equal(ConnectionMode.Automatic, _store.Last!.Global.ConnectionMode);
+    }
+
+    [Fact]
+    public async Task ModoPerguntar_RespostaPeloDialogoOuMenu()
+    {
+        Start(real: false, new WireflexConfig { Global = new GlobalSettings { ConnectionMode = ConnectionMode.Ask } });
+        await AdbAvailableAsync();
+        await SendAsync(new DeviceAppeared(Usb()));
+        Assert.Single(_executor.Actions.OfType<AskUser>());
+
+        Commands().Answer(Phone, accepted: false);
+        await IdleAsync();
+        Assert.Equal(PhonePhase.ClosedByUser, Assert.Single(_coordinator.GetStatus()).Phase);
+
+        // Disse não, mas mudou de ideia: "Abrir agora".
+        Commands().OpenNow(Phone);
+        await IdleAsync();
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task AbrirAgora_DepoisDeFecharAJanela()
+    {
+        await MirroringByCableAsync();
+        _coordinator.Post(new ScrcpyClosedByUser(Phone, Phone));
+        await IdleAsync();
+
+        Commands().OpenNow(Phone);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+        Assert.Equal(PhonePhase.Mirroring, Assert.Single(_coordinator.GetStatus()).Phase);
+    }
+
+    [Fact]
     public async Task CadaAcao_VaiParaOLogComOTextoDaTela()
     {
         var logs = new RecordingLoggerFactory();
@@ -651,7 +979,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     {
         _catalog = new PhoneCatalog(stored ?? new WireflexConfig(), real ? _store : null);
         _coordinator = new ConnectionCoordinator(
-            new DecisionEngine(_ => ConnectionMode.Automatic),
+            new DecisionEngine(serial => _catalog.ResolveConnectionMode(serial)),
             _executor,
             _adb,
             _catalog,
@@ -659,6 +987,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
             {
                 PrepareWifi = real,
                 ReconnectWifi = real,
+                DisconnectWifiOnForget = real,
                 HoldLimit = HoldLimit,
                 UsbStableWindow = StableWindow,
                 Preparer = new WifiPreparerOptions { TcpipSettleDelay = SettleDelay },
@@ -671,6 +1000,8 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     private Task AdbAvailableAsync() => SendAsync(new MonitorStatusChanged(true, null));
+
+    private TrayCommands Commands() => new(_coordinator, _catalog);
 
     private async Task MirroringByCableAsync()
     {
@@ -686,6 +1017,28 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         var open = _executor.Actions.OfType<OpenScrcpy>().Last();
         _coordinator.Post(new ScrcpyExited(Phone, open.AdbSerial, FailedAtStart: true, Runtime: TimeSpan.FromSeconds(0.4)));
         await IdleAsync();
+    }
+
+    /// <summary>O scrcpy aberto cai depois de um tempo aberto (código 2), sem evento do adb.</summary>
+    private async Task DropAsync(TimeSpan runtime)
+    {
+        var open = _executor.Actions.OfType<OpenScrcpy>().Last();
+        _coordinator.Post(new ScrcpyExited(Phone, open.AdbSerial, FailedAtStart: false, Runtime: runtime));
+        await IdleAsync();
+    }
+
+    /// <summary>Abre pelo cabo e gasta as 3 reaberturas depois de queda (a 3ª fica aberta).</summary>
+    private async Task UseAllDropsAsync()
+    {
+        await MirroringByCableAsync();
+        foreach (var delay in DropDelays)
+        {
+            await DropAsync(TimeSpan.FromSeconds(20));
+            await _time.AdvanceWhenTimerCreatedAsync(delay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
     }
 
     /// <summary>Abre pelo cabo e gasta as 3 tentativas (a 3ª fica aberta).</summary>

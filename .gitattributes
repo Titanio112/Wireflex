@@ -28,3 +28,5 @@
 *.zip     binary
 *.exe     binary
 *.dll     binary
+
+tools/release/LEIA-ME.txt text eol=crlf

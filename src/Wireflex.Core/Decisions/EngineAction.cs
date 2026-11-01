@@ -32,4 +32,7 @@ public enum DeviceNotice
 
     /// <summary>O adb vê o celular, mas ele não responde.</summary>
     Offline,
+
+    /// <summary>O espelhamento caiu várias vezes seguidas com o celular online; parou de reabrir sozinho.</summary>
+    MirroringKeepsDropping,
 }

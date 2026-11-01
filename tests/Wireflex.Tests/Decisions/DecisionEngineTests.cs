@@ -69,7 +69,7 @@ public class DecisionEngineTests
     {
         PlugCable(Phone1);
 
-        Only<DoNothing>(UnplugCable(Phone1));
+        Assert.Equal("celular fora do alcance (sem USB e sem Wi-Fi)", Only<CloseScrcpy>(UnplugCable(Phone1)).Reason);
 
         Assert.Equal(PhonePhase.OutOfRange, Status(Phone1).Phase);
         Assert.Null(Status(Phone1).ScrcpyTransport);
@@ -186,6 +186,38 @@ public class DecisionEngineTests
     }
 
     [Fact]
+    public void WifiOfflineWhileMirroring_ClosesScrcpyAndReopensOnceWhenBack()
+    {
+        Only<OpenScrcpy>(WifiOn(Phone1, Wifi1));
+
+        // #40: antes só apagava a marca, e a saída do scrcpy chegava depois como "scrcpy antigo".
+        var actions = Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Offline));
+
+        Assert.Collection(
+            actions,
+            a => Assert.Equal("celular ficou offline", Assert.IsType<CloseScrcpy>(a).Reason),
+            a => Assert.Equal(DeviceNotice.Offline, Assert.IsType<NotifyUser>(a).Notice));
+        Assert.Equal(PhonePhase.OutOfRange, Status(Phone1).Phase);
+
+        var open = Only<OpenScrcpy>(Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Device)));
+        Assert.Equal(Wifi1, open.AdbSerial);
+        Assert.Equal(Wifi1, Status(Phone1).ScrcpyAdbSerial);
+    }
+
+    [Fact]
+    public void WifiOfflineWithCableStillThere_NoScrcpyToClose_DoesNothingExtra()
+    {
+        PlugCable(Phone1);
+        WifiOn(Phone1, Wifi1);
+
+        // O scrcpy está no cabo, que continua bom: nada a fechar.
+        Assert.DoesNotContain(
+            Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Offline)),
+            a => a is CloseScrcpy);
+        Assert.Equal(Phone1, Status(Phone1).ScrcpyAdbSerial);
+    }
+
+    [Fact]
     public void Unauthorized_DoesNotOpen_OnlyNotifiesOnce()
     {
         var notice = Only<NotifyUser>(PlugCable(Phone1, AdbDeviceState.Unauthorized));
@@ -213,9 +245,12 @@ public class DecisionEngineTests
     {
         PlugCable(Phone1);
 
-        var notice = Only<NotifyUser>(Handle(new ConnectionStateChanged(Phone1, Phone1, AdbDeviceState.Unauthorized)));
+        var actions = Handle(new ConnectionStateChanged(Phone1, Phone1, AdbDeviceState.Unauthorized));
 
-        Assert.Equal(DeviceNotice.Unauthorized, notice.Notice);
+        Assert.Collection(
+            actions,
+            a => Assert.Equal("celular sem autorização", Assert.IsType<CloseScrcpy>(a).Reason),
+            a => Assert.Equal(DeviceNotice.Unauthorized, Assert.IsType<NotifyUser>(a).Notice));
         Assert.Null(Status(Phone1).ScrcpyTransport);
     }
 
@@ -350,7 +385,10 @@ public class DecisionEngineTests
         Only<OpenScrcpy>(WifiOn(Phone2, Wifi2));
 
         Handle(new ScrcpyClosedByUser(Phone1, Phone1));
-        Only<NotifyUser>(Handle(new ConnectionStateChanged(Phone2, Wifi2, AdbDeviceState.Offline)));
+        Assert.Collection(
+            Handle(new ConnectionStateChanged(Phone2, Wifi2, AdbDeviceState.Offline)),
+            a => Assert.IsType<CloseScrcpy>(a),
+            a => Assert.IsType<NotifyUser>(a));
 
         Assert.Equal(PhonePhase.ClosedByUser, Status(Phone1).Phase);
         Assert.Equal(PhonePhase.OutOfRange, Status(Phone2).Phase);
@@ -387,6 +425,85 @@ public class DecisionEngineTests
 
         Assert.Equal(PhonePhase.Mirroring, Status(Phone1).Phase);
         Assert.Equal(Phone1, Status(Phone1).ScrcpyAdbSerial);
+    }
+
+    [Fact]
+    public void OpenRequested_AfterUserClosed_Opens()
+    {
+        PlugCable(Phone1);
+        Handle(new ScrcpyClosedByUser(Phone1, Phone1));
+
+        var open = Only<OpenScrcpy>(Handle(new OpenRequested(Phone1)));
+
+        Assert.Equal(AdbTransport.Usb, open.Transport);
+        Assert.Equal(PhonePhase.Mirroring, Status(Phone1).Phase);
+    }
+
+    [Fact]
+    public void OpenRequested_InAskMode_OpensWithoutAsking()
+    {
+        _config.Global.ConnectionMode = ConnectionMode.Ask;
+        Only<AskUser>(PlugCable(Phone1));
+
+        Only<OpenScrcpy>(Handle(new OpenRequested(Phone1)));
+        Assert.Equal(PhonePhase.Mirroring, Status(Phone1).Phase);
+    }
+
+    [Fact]
+    public void OpenRequested_RefusedWhenPausedDisabledOrOutOfRange()
+    {
+        Only<DoNothing>(Handle(new OpenRequested(Phone1)));
+
+        PlugCable(Phone1);
+        Handle(new PhonePauseChanged(Phone1, true));
+        Only<DoNothing>(Handle(new OpenRequested(Phone1)));
+
+        SetPhoneMode(Phone2, ConnectionMode.Never);
+        PlugCable(Phone2);
+        Only<DoNothing>(Handle(new OpenRequested(Phone2)));
+    }
+
+    [Fact]
+    public void DisablingWhileMirroring_ClosesScrcpy_AndEnablingReopens()
+    {
+        PlugCable(Phone1);
+        SetPhoneMode(Phone1, ConnectionMode.Never);
+
+        Only<CloseScrcpy>(Handle(new Reevaluate(Phone1, "celular desativado")));
+
+        _config.Phones.Clear();
+        Only<OpenScrcpy>(Handle(new Reevaluate(Phone1, "celular ativado")));
+    }
+
+    [Fact]
+    public void ForgottenWhileConnected_ClosesAndStaysIgnoredUntilOutOfRange()
+    {
+        PlugCable(Phone1);
+        WifiOn(Phone1, Wifi1);
+
+        Only<CloseScrcpy>(Handle(new PhoneForgotten(Phone1)));
+        Assert.Equal(PhonePhase.Ignored, Status(Phone1).Phase);
+
+        // Ainda ao alcance: nada abre sozinho, nem avisa.
+        Only<DoNothing>(UnplugCable(Phone1));
+        Only<DoNothing>(Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Unauthorized)));
+        Only<DoNothing>(Handle(new ConnectionStateChanged(Phone1, Wifi1, AdbDeviceState.Device)));
+        Only<DoNothing>(Handle(new Reevaluate(null, "teste")));
+        Only<DoNothing>(Handle(new OpenRequested(Phone1)));
+
+        // Sai do alcance e volta: é um celular como outro qualquer.
+        WifiOff(Phone1, Wifi1);
+        Only<OpenScrcpy>(PlugCable(Phone1));
+    }
+
+    [Fact]
+    public void ForgottenBeforeConnectionsArrive_StaysIgnored()
+    {
+        // O coordenador segurava os eventos: o motor recebe o "esquecido" antes das conexões.
+        Only<DoNothing>(Handle(new PhoneForgotten(Phone1)));
+
+        Only<DoNothing>(PlugCable(Phone1));
+        Assert.Equal(PhonePhase.Ignored, Status(Phone1).Phase);
     }
 
     [Fact]

@@ -29,6 +29,18 @@ public sealed record ScrcpyExited(string Serial, string AdbSerial, bool FailedAt
 /// <summary>O usuário pausou (ou retomou) este celular.</summary>
 public sealed record PhonePauseChanged(string Serial, bool Paused) : EngineInput;
 
+/// <summary>
+/// O usuário pediu "Abrir agora": abre mesmo se ele tinha fechado a janela ou se o modo for perguntar.
+/// Não abre se estiver pausado, desativado (modo nunca), esquecido ou fora do alcance.
+/// </summary>
+public sealed record OpenRequested(string Serial) : EngineInput;
+
+/// <summary>
+/// O usuário esqueceu o celular. Se ele ainda estiver ao alcance, o scrcpy fecha e o celular fica ignorado até sair do
+/// alcance (sem cabo e sem Wi-Fi) e voltar.
+/// </summary>
+public sealed record PhoneForgotten(string Serial) : EngineInput;
+
 /// <summary>Resposta do usuário à pergunta "abrir o espelhamento?".</summary>
 public sealed record UserAnswered(string Serial, bool Accepted) : EngineInput;
 

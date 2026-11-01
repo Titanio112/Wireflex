@@ -437,3 +437,6 @@ PROJECT_MEMORY.md
 memory/
 .clinerules
 .cursor/
+
+# Script e LEIA-ME do pacote portátil (a regra [Rr]elease/ acima é para pastas de build)
+!tools/release/

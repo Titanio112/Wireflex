@@ -78,6 +78,9 @@ internal sealed class FakeAdbClient(TimeProvider time) : IAdbClient
     public Task<AdbConnectResult> ConnectAsync(string host, int port, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException();
 
+    public Task<bool> DisconnectAsync(string host, int port, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException();
+
     /// <summary>
     /// Para checagens negativas ("não deve consultar"): espera no máximo <paramref name="within"/> (curto)
     /// para ver se o número de consultas passa de <paramref name="count"/>.

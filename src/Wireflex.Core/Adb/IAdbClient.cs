@@ -33,6 +33,12 @@ public interface IAdbClient
 
     /// <summary>Conecta por Wi-Fi (<c>adb connect</c>).</summary>
     Task<AdbConnectResult> ConnectAsync(string host, int port, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Desconecta uma conexão Wi-Fi (<c>adb disconnect</c>). <c>false</c> se o servidor não tinha essa conexão.
+    /// Não sobe o servidor do adb.
+    /// </summary>
+    Task<bool> DisconnectAsync(string host, int port, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Resultado de <c>adb connect</c>. A mensagem pode ter IP: mascare antes de mostrar.</summary>
