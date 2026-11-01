@@ -35,6 +35,8 @@ public static class EngineActionText
                 $"Avisar {Id(a.Serial)}: o celular está pedindo para autorizar a depuração USB (unauthorized)",
             NotifyUser { Notice: DeviceNotice.Offline } a =>
                 $"Avisar {Id(a.Serial)}: o adb vê o celular, mas ele não responde (offline)",
+            NotifyUser { Notice: DeviceNotice.MirroringKeepsDropping } a =>
+                $"Avisar {Id(a.Serial)}: o espelhamento caiu várias vezes seguidas; não reabre mais sozinho",
             NotifyUser a =>
                 $"Avisar {Id(a.Serial)}: {a.Notice}",
             DoNothing a =>

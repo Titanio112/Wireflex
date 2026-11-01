@@ -25,6 +25,7 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     private static readonly TimeSpan Interval = TimeSpan.FromSeconds(15);
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan OfflineDelay = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan[] DropDelays = [TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30)];
 
     private readonly TimerTrackingTimeProvider _time = new();
     private readonly ScriptedAdbClient _adb = new();
@@ -570,6 +571,141 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
     }
 
     [Fact]
+    public async Task ScrcpyCaiNoMeioDoUso_ReabreDepoisDeTresSegundos()
+    {
+        await MirroringByCableAsync();
+
+        // #41: caiu com o celular ainda online e nenhum evento do adb.
+        await DropAsync(TimeSpan.FromSeconds(60));
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Equal(2, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyCaiComMenosDeDezSegundos_NaoEQuedaNoMeioDoUso()
+    {
+        await MirroringByCableAsync();
+
+        await DropAsync(TimeSpan.FromSeconds(4));
+        _time.Advance(DropDelays[^1]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_PausadoAntesDaEspera_NaoReabre()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+
+        _coordinator.Post(new PhonePauseChanged(Phone, true));
+        await IdleAsync();
+        _time.Advance(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_DesativadoAntesDaEspera_NaoReabre()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+
+        await _catalog.SetPhoneConnectionModeAsync(Phone, ConnectionMode.Never);
+        _time.Advance(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_EventoDoMonitorNaEspera_CancelaEOFluxoNormalAssume()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+
+        // O adb percebeu a queda: o celular saiu do alcance; o timer não pode reabrir.
+        await SendAsync(new DeviceDisappeared(Usb()));
+        _time.Advance(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Single(_executor.Actions.OfType<OpenScrcpy>());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_NoMaximoTresReaberturasEUmAvisoSo()
+    {
+        await MirroringByCableAsync();
+        foreach (var delay in DropDelays)
+        {
+            await DropAsync(TimeSpan.FromSeconds(20));
+            await _time.AdvanceWhenTimerCreatedAsync(delay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+
+        await DropAsync(TimeSpan.FromSeconds(20));
+        await DropAsync(TimeSpan.FromSeconds(20));
+        _time.Advance(DropDelays[^1]);
+        await IdleAsync();
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+        var notice = Assert.Single(_executor.Actions.OfType<NotifyUser>());
+        Assert.Equal(DeviceNotice.MirroringKeepsDropping, notice.Notice);
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_DepoisDeCincoMinutos_VoltaAReabrir()
+    {
+        await UseAllDropsAsync();
+
+        _time.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
+        await DropAsync(TimeSpan.FromSeconds(20));
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Equal(5, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_DepoisDeDoisMinutosAberto_ZeraAContagem()
+    {
+        await UseAllDropsAsync();
+
+        await DropAsync(TimeSpan.FromMinutes(3));
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        Assert.Equal(5, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
+    public async Task ScrcpyCai_ReaberturaQueFalhaAoAbrir_TetoComumDeTres()
+    {
+        await MirroringByCableAsync();
+        await DropAsync(TimeSpan.FromSeconds(60));
+        await _time.AdvanceWhenTimerCreatedAsync(DropDelays[0]);
+        await IdleAsync();
+
+        // A reabertura falha ao abrir: as tentativas da #24 contam junto (1 queda + 2 tentativas = 3).
+        for (var i = 0; i < 3; i++)
+        {
+            await FailAtStartAsync();
+            _time.Advance(RetryDelay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
+    }
+
+    [Fact]
     public async Task OfflineCurto_NaoAvisa()
     {
         Start(real: false);
@@ -881,6 +1017,28 @@ public sealed class ConnectionCoordinatorTests : IAsyncDisposable
         var open = _executor.Actions.OfType<OpenScrcpy>().Last();
         _coordinator.Post(new ScrcpyExited(Phone, open.AdbSerial, FailedAtStart: true, Runtime: TimeSpan.FromSeconds(0.4)));
         await IdleAsync();
+    }
+
+    /// <summary>O scrcpy aberto cai depois de um tempo aberto (código 2), sem evento do adb.</summary>
+    private async Task DropAsync(TimeSpan runtime)
+    {
+        var open = _executor.Actions.OfType<OpenScrcpy>().Last();
+        _coordinator.Post(new ScrcpyExited(Phone, open.AdbSerial, FailedAtStart: false, Runtime: runtime));
+        await IdleAsync();
+    }
+
+    /// <summary>Abre pelo cabo e gasta as 3 reaberturas depois de queda (a 3ª fica aberta).</summary>
+    private async Task UseAllDropsAsync()
+    {
+        await MirroringByCableAsync();
+        foreach (var delay in DropDelays)
+        {
+            await DropAsync(TimeSpan.FromSeconds(20));
+            await _time.AdvanceWhenTimerCreatedAsync(delay);
+            await IdleAsync();
+        }
+
+        Assert.Equal(4, _executor.Actions.OfType<OpenScrcpy>().Count());
     }
 
     /// <summary>Abre pelo cabo e gasta as 3 tentativas (a 3ª fica aberta).</summary>

@@ -13,6 +13,7 @@ public static class TrayTexts
     {
         DeviceNotice.Unauthorized => $"{name}: autorize a depuração USB na tela do celular.",
         DeviceNotice.Offline => $"{name}: o adb vê o celular, mas ele não responde (offline).",
+        DeviceNotice.MirroringKeepsDropping => $"O espelhamento de {name} caiu várias vezes seguidas. Abra pelo menu quando quiser.",
         _ => $"{name}: {notice}",
     };
 
