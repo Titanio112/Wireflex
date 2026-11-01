@@ -78,7 +78,19 @@ assim, dê uma olhada antes de anexar.
   celular, instalador e atualização automática.
 
 
-7. COMO REMOVER
+7. PROBLEMAS CONHECIDOS
+-----------------------
+- Celular que "dorme" no Wi-Fi (tela apagada) pode gerar avisos de "não
+  responde (offline)" várias vezes por dia. No modo "perguntar antes de
+  abrir", a pergunta aparece de novo cada vez que ele acorda, mesmo depois de
+  você responder "Não". Se incomodar, use o modo automático ou desative esse
+  celular no menu. (issue #44)
+- Logo depois de tirar o cabo, a janela que abre pelo Wi-Fi às vezes fecha
+  sozinha poucos segundos depois e não volta. Use "Abrir agora" no menu do
+  celular. (issue #45)
+
+
+8. COMO REMOVER
 ---------------
 Desmarque "Iniciar com o Windows", clique em "Sair" no menu do ícone e apague a
 pasta do Wireflex. Se quiser apagar também a configuração e os logs, apague as

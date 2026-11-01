@@ -71,6 +71,10 @@ Primeira versão de testes do Wireflex 2: a tela do celular Android no PC, conec
 - Perfis do scrcpy por celular, notificação com botões, início em horário agendado.
 - Instalador, atualização automática e executável assinado.
 
+### Problemas conhecidos
+- **Avisos e perguntas repetidos com celular que "dorme" no Wi-Fi** ([#44](https://github.com/Titanio112/Wireflex/issues/44)): com a tela apagada, alguns celulares saem e voltam do Wi-Fi várias vezes por dia. Cada vez aparece o aviso "não responde (offline)" e, no modo "perguntar antes de abrir", a pergunta volta, mesmo depois de um "Não". Se incomodar, use o modo automático ou desative esse celular no menu.
+- **Janela fecha logo depois de tirar o cabo** ([#45](https://github.com/Titanio112/Wireflex/issues/45)): às vezes a janela que abre pelo Wi-Fi fecha sozinha poucos segundos depois e não volta. Use "Abrir agora" no menu do celular.
+
 ### Verificação
 SHA-256 do `Wireflex-2.0.0-beta.1-win-x64.zip`:
 
